@@ -1,0 +1,203 @@
+@startuml
+'============================================================
+' 在线考试系统（OES）用例图
+' 版本：V1.0  作者：林晓（需求分析师）  日期：2026-10-31
+' 对应文档：docs/requirements/需求规格说明书.md
+' 用例编号：UC-01 ~ UC-41
+'============================================================
+
+left to right direction
+skinparam packageStyle rectangle
+skinparam backgroundColor #0B1020
+skinparam defaultFontColor #E2E8F0
+skinparam usecaseBackgroundColor #10182B
+skinparam usecaseBorderColor #22D3EE
+skinparam usecaseFontColor #E2E8F0
+skinparam actorBackgroundColor #1E293B
+skinparam actorBorderColor #A855F7
+skinparam actorFontColor #E2E8F0
+skinparam ArrowColor #22D3EE
+skinparam shadowing false
+skinparam nodesep 12
+skinparam ranksep 40
+
+actor "管理员" as Admin
+actor "教师" as Teacher
+actor "学生" as Student
+
+rectangle "在线考试系统（OES）" {
+
+  '---------- 身份与权限（UC-01 ~ UC-07） ----------
+  usecase "UC-01\n登录认证" as UC01
+  usecase "UC-02\n令牌刷新与轮换" as UC02
+  usecase "UC-03\n安全登出" as UC03
+  usecase "UC-04\n用户账号管理" as UC04
+  usecase "UC-05\n角色与权限分配" as UC05
+  usecase "UC-06\n学生注册申请" as UC06
+  usecase "UC-07\n个人资料与密码管理" as UC07
+
+  '---------- 题库管理（UC-08 ~ UC-11） ----------
+  usecase "UC-08\n题库维护（增删改）" as UC08
+  usecase "UC-09\n题目检索与导出" as UC09
+  usecase "UC-10\n题目批量导入" as UC10
+  usecase "UC-11\n知识点与难度维护" as UC11
+
+  '---------- 试卷与组卷（UC-12 ~ UC-16） ----------
+  usecase "UC-12\n手动组卷" as UC12
+  usecase "UC-13\n随机组卷" as UC13
+  usecase "UC-14\n试卷预览与复制" as UC14
+  usecase "UC-15\n试卷锁定与归档" as UC15
+  usecase "UC-16\n试卷检索" as UC16
+
+  '---------- 考试与答题（UC-17 ~ UC-25） ----------
+  usecase "UC-17\n创建考试" as UC17
+  usecase "UC-18\n发布考试" as UC18
+  usecase "UC-19\n考试变更与补考授权" as UC19
+  usecase "UC-20\n考生资格校验" as UC20
+  usecase "UC-21\n在线答题" as UC21
+  usecase "UC-22\n客观题自动判分" as UC22
+  usecase "UC-23\n交卷（幂等）" as UC23
+  usecase "UC-24\n断线重连恢复" as UC24
+  usecase "UC-25\n防作弊事件采集" as UC25
+
+  '---------- 阅卷与复核（UC-26 ~ UC-30） ----------
+  usecase "UC-26\n主观题人工阅卷" as UC26
+  usecase "UC-27\n双评与争议仲裁" as UC27
+  usecase "UC-28\n阅卷进度监控" as UC28
+  usecase "UC-29\n标准答案修正与批量重判" as UC29
+  usecase "UC-30\n成绩复核申诉" as UC30
+
+  '---------- 成绩统计（UC-31 ~ UC-36） ----------
+  usecase "UC-31\n个人成绩查询" as UC31
+  usecase "UC-32\n成绩发布" as UC32
+  usecase "UC-33\n考试统计与题目分析" as UC33
+  usecase "UC-34\n趋势与对比分析" as UC34
+  usecase "UC-35\n成绩导出" as UC35
+  usecase "UC-36\n统计图表展示" as UC36
+
+  '---------- 系统管理（UC-37 ~ UC-41） ----------
+  usecase "UC-37\n系统参数配置" as UC37
+  usecase "UC-38\n审计日志管理" as UC38
+  usecase "UC-39\n公告管理" as UC39
+  usecase "UC-40\n数据备份与恢复" as UC40
+  usecase "UC-41\n系统健康检查" as UC41
+
+}
+
+'============================================================
+' 参与者与用例的关联关系
+'============================================================
+
+'---------- 管理员 ----------
+Admin --> UC01
+Admin --> UC03
+Admin --> UC04
+Admin --> UC05
+Admin --> UC07
+Admin --> UC08
+Admin --> UC09
+Admin --> UC10
+Admin --> UC11
+Admin --> UC14
+Admin --> UC15
+Admin --> UC16
+Admin --> UC18
+Admin --> UC19
+Admin --> UC26
+Admin --> UC27
+Admin --> UC28
+Admin --> UC29
+Admin --> UC30
+Admin --> UC32
+Admin --> UC33
+Admin --> UC34
+Admin --> UC35
+Admin --> UC37
+Admin --> UC38
+Admin --> UC39
+Admin --> UC40
+Admin --> UC41
+
+'---------- 教师 ----------
+Teacher --> UC01
+Teacher --> UC03
+Teacher --> UC07
+Teacher --> UC08
+Teacher --> UC09
+Teacher --> UC10
+Teacher --> UC12
+Teacher --> UC13
+Teacher --> UC14
+Teacher --> UC15
+Teacher --> UC16
+Teacher --> UC17
+Teacher --> UC18
+Teacher --> UC19
+Teacher --> UC26
+Teacher --> UC27
+Teacher --> UC28
+Teacher --> UC30
+Teacher --> UC31
+Teacher --> UC32
+Teacher --> UC33
+Teacher --> UC34
+Teacher --> UC35
+
+'---------- 学生 ----------
+Student --> UC01
+Student --> UC03
+Student --> UC06
+Student --> UC07
+Student --> UC21
+Student --> UC30
+Student --> UC31
+Student --> UC35
+
+'============================================================
+' 用例之间的关系（include / extend）
+'============================================================
+
+' 登录认证被令牌刷新扩展：Access Token 过期时触发
+UC02 ..> UC01 : <<extend>>
+
+' 角色与权限分配扩展用户账号管理：需要调整权限时触发
+UC05 ..> UC04 : <<extend>>
+
+' 创建考试需要先检索并选择试卷
+UC17 ..> UC16 : <<include>>
+
+' 在线答题包含考生资格校验、交卷与客观题自动判分
+UC21 ..> UC20 : <<include>>
+UC21 ..> UC23 : <<include>>
+UC21 ..> UC22 : <<include>>
+
+' 断线重连恢复扩展在线答题：刷新页面或断网重连时触发
+UC24 ..> UC21 : <<extend>>
+
+' 防作弊事件采集扩展在线答题：检测到切屏/复制/多端登录时触发
+UC25 ..> UC21 : <<extend>>
+
+' 双评与争议仲裁扩展主观题人工阅卷：双评分歧超过阈值时触发
+UC27 ..> UC26 : <<extend>>
+
+' 成绩复核申诉扩展个人成绩查询：学生在申诉期内发起复核时触发
+UC30 ..> UC31 : <<extend>>
+
+' 统计与对比分析均需要统计图表渲染支持
+UC33 ..> UC36 : <<include>>
+UC34 ..> UC36 : <<include>>
+
+'============================================================
+' 图例与说明
+'============================================================
+legend right
+  |<#22D3EE>| 参与者关联 |
+  |..>| <<include>>：基础用例必然调用被包含用例 |
+  |..>| <<extend>>：满足条件时扩展基础用例 |
+  |UC-21 在线答题| include UC-20 资格校验、UC-23 交卷、UC-22 自动判分 |
+  |UC-24 / UC-25| 分别扩展 UC-21 断线恢复与防作弊采集 |
+  |UC-27| 扩展 UC-26 主观题人工阅卷（双评分歧仲裁） |
+  |UC-30| 扩展 UC-31 个人成绩查询（成绩复核申诉） |
+endlegend
+
+@enduml

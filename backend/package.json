@@ -1,0 +1,37 @@
+{
+  "name": "oes-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "在线考试系统（OES）后端：Express 4 + MySQL 8 + JWT/RBAC 分层实现",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:init": "node scripts/init-db.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "test": "node tests/grader.test.js",
+    "test:grader": "node tests/grader.test.js",
+    "check": "node scripts/check-syntax.js",
+    "smoke": "node scripts/smoke-test.js",
+    "smoke:extra": "node scripts/smoke-extra.js",
+    "endpoints": "node scripts/count-endpoints.js",
+    "smoke:admin": "node scripts/smoke-admin.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "mysql2": "^3.11.0",
+    "zod": "^3.23.8"
+  }
+}

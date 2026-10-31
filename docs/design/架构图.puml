@@ -1,0 +1,294 @@
+@startuml OES-Layered-Architecture
+' =====================================================================
+'  在线考试系统（OES）分层架构图
+'  版本：V1.0  作者：陈工（系统架构师）  日期：2026-10-31
+'  对应设计文档：docs/design/系统设计文档.md §3.1
+'  说明：单体分层架构（前后端分离），不引入微服务、消息队列与 Redis
+' =====================================================================
+
+title 在线考试系统（OES）分层架构图（单体分层 + 前后端分离）
+
+skinparam backgroundColor #0B1020
+skinparam defaultFontColor #E2E8F0
+skinparam componentBackgroundColor #10182B
+skinparam componentBorderColor #22D3EE
+skinparam componentFontColor #E2E8F0
+skinparam packageBackgroundColor #111827
+skinparam packageBorderColor #A855F7
+skinparam packageFontColor #E2E8F0
+skinparam databaseBackgroundColor #10182B
+skinparam databaseBorderColor #34D399
+skinparam ArrowColor #22D3EE
+skinparam shadowing false
+skinparam nodesep 16
+skinparam ranksep 42
+
+package "客户端层（浏览器 / SPA）" as CLIENT {
+  [登录注册页\n/auth] as FE_AUTH
+  [管理员工作台\n/admin/*] as FE_ADMIN
+  [教师工作台\n/teacher/*] as FE_TEACHER
+  [学生工作台与答题页\n/student/*] as FE_STUDENT
+  [成绩与统计图表\nECharts] as FE_CHART
+  package "前端公共设施" {
+    [React Router 路由守卫\n按角色渲染菜单] as FE_ROUTER
+    [状态管理 Context\nAxios API 封装 + 401 自动刷新] as FE_STORE
+  }
+}
+
+package "接入层" as ACCESS {
+  [Nginx\nHTTPS 终止 / 静态资源 / 反向代理] as NGINX
+}
+
+package "应用层（Node.js 18 LTS + Express 4）" as APP {
+
+  package "中间件层 middleware" {
+    [请求日志与 traceId] as MW_LOG
+    [JWT 校验\nHS256 签名/有效期/tokenVersion] as MW_JWT
+    [RBAC 功能权限\npermissionCode 映射] as MW_RBAC
+    [数据权限\n教师本人 / 学生本人] as MW_SCOPE
+    [参数 Schema 校验\nbody/query/path] as MW_VALID
+    [统一响应与错误处理\n{code,message,data}] as MW_ERR
+    [审计日志拦截\n敏感操作留痕] as MW_AUDIT
+  }
+
+  package "路由层 routes" {
+    [auth.routes] as R_AUTH
+    [user.routes] as R_USER
+    [question.routes] as R_QB
+    [paper.routes] as R_PAPER
+    [exam.routes] as R_EXAM
+    [attempt.routes] as R_ATTEMPT
+    [grading.routes] as R_GRADE
+    [stat.routes] as R_STAT
+    [system.routes] as R_SYS
+  }
+
+  package "控制层 controllers" {
+    [AuthController] as C_AUTH
+    [UserController] as C_USER
+    [QuestionController] as C_QB
+    [PaperController] as C_PAPER
+    [ExamController] as C_EXAM
+    [AttemptController] as C_ATTEMPT
+    [GradingController] as C_GRADE
+    [StatController] as C_STAT
+    [SystemController] as C_SYS
+  }
+
+  package "服务层 services（业务规则唯一出口）" {
+    [authService\n登录锁定/令牌轮换] as S_AUTH
+    [questionBankService\n题目校验/版本/删除保护] as S_QB
+    [paperService\n组卷/分值校验/锁定] as S_PAPER
+    [examService\n发布/变更/补考授权] as S_EXAM
+    [attemptService\n资格校验/快照/计时/幂等交卷] as S_ATTEMPT
+    [gradingService\n自动判分/人工阅卷/仲裁/重判] as S_GRADE
+    [statService\n统计物化/质量分析] as S_STAT
+    [auditService\n审计与备份] as S_AUDIT
+  }
+
+  package "模型层 models（mysql2 连接池 + 参数化 SQL）" {
+    [userModel] as M_USER
+    [questionModel] as M_QB
+    [paperModel] as M_PAPER
+    [examModel] as M_EXAM
+    [attemptModel] as M_ATTEMPT
+    [gradingModel] as M_GRADE
+    [statModel] as M_STAT
+    [systemModel] as M_SYS
+    [transaction 事务封装] as M_TX
+  }
+
+  package "进程内任务（不引入消息队列）" {
+    [定时轮询 30s\n超时答卷自动交卷] as JOB_TIMEOUT
+    [判分任务重放\n失败重试，结果一致] as JOB_REGRADE
+    [统计物化刷新\n交卷/阅卷后触发] as JOB_STAT
+    [备份与日志清理\n每日 02:00] as JOB_BACKUP
+  }
+}
+
+database "MySQL 8.0（单实例 / 单库 oes / InnoDB）" as DB {
+  [系统域 sys_*] as DB_SYS
+  [题库域 kb_* / qb_*] as DB_QB
+  [试卷与考试域 pp_* / ex_*] as DB_EX
+  [阅卷与统计域 mk_* / st_*] as DB_ST
+}
+
+' ---------- 客户端与接入层 ----------
+FE_AUTH --> NGINX : HTTPS /api/v1
+FE_ADMIN --> NGINX
+FE_TEACHER --> NGINX
+FE_STUDENT --> NGINX
+FE_CHART --> NGINX
+FE_ROUTER ..> FE_ADMIN : 角色守卫
+FE_STORE ..> FE_STUDENT : 令牌注入
+
+NGINX --> MW_LOG : 反向代理
+
+' ---------- 中间件链路 ----------
+MW_LOG --> MW_JWT
+MW_JWT --> MW_RBAC
+MW_RBAC --> MW_SCOPE
+MW_SCOPE --> MW_VALID
+MW_VALID --> MW_ERR
+MW_SCOPE --> MW_AUDIT
+
+' ---------- 路由到控制层 ----------
+MW_VALID --> R_AUTH
+MW_VALID --> R_USER
+MW_VALID --> R_QB
+MW_VALID --> R_PAPER
+MW_VALID --> R_EXAM
+MW_VALID --> R_ATTEMPT
+MW_VALID --> R_GRADE
+MW_VALID --> R_STAT
+MW_VALID --> R_SYS
+
+R_AUTH --> C_AUTH
+R_USER --> C_USER
+R_QB --> C_QB
+R_PAPER --> C_PAPER
+R_EXAM --> C_EXAM
+R_ATTEMPT --> C_ATTEMPT
+R_GRADE --> C_GRADE
+R_STAT --> C_STAT
+R_SYS --> C_SYS
+
+' ---------- 控制层到服务层 ----------
+C_AUTH --> S_AUTH
+C_USER --> S_AUTH
+C_QB --> S_QB
+C_PAPER --> S_PAPER
+C_EXAM --> S_EXAM
+C_ATTEMPT --> S_ATTEMPT
+C_GRADE --> S_GRADE
+C_STAT --> S_STAT
+C_SYS --> S_AUDIT
+
+' ---------- 服务层跨域协作 ----------
+S_ATTEMPT ..> S_PAPER : 读取试卷快照
+S_ATTEMPT ..> S_GRADE : 交卷后触发判分
+S_GRADE ..> S_STAT : 判分完成刷新统计
+S_EXAM ..> S_PAPER : 校验锁定状态
+S_QB ..> S_PAPER : 提供组卷候选题目
+
+' ---------- 服务层到模型层 ----------
+S_AUTH --> M_USER
+S_QB --> M_QB
+S_PAPER --> M_PAPER
+S_EXAM --> M_EXAM
+S_ATTEMPT --> M_ATTEMPT
+S_GRADE --> M_GRADE
+S_STAT --> M_STAT
+S_AUDIT --> M_SYS
+M_QB --> M_TX
+M_PAPER --> M_TX
+M_ATTEMPT --> M_TX
+M_GRADE --> M_TX
+
+' ---------- 模型层到数据库 ----------
+M_USER --> DB_SYS
+M_QB --> DB_QB
+M_PAPER --> DB_EX
+M_EXAM --> DB_EX
+M_ATTEMPT --> DB_EX
+M_GRADE --> DB_ST
+M_STAT --> DB_ST
+M_SYS --> DB_SYS
+
+' ---------- 进程内任务 ----------
+JOB_TIMEOUT --> S_ATTEMPT
+JOB_REGRADE --> S_GRADE
+JOB_STAT --> S_STAT
+JOB_BACKUP --> S_AUDIT
+
+note right of APP
+  **分层调用约束**
+  1. routes 只做路由与中间件绑定，不写业务逻辑
+  2. controllers 只做参数装配、调用 service、返回统一响应
+  3. services 承载全部业务规则与事务边界
+  4. models 只做 SQL 访问，禁止跨表业务判断
+  5. 任何层不得直接拼接 SQL 字符串（全部参数化）
+end note
+
+note bottom of DB
+  **关键约束**
+  - 考试以服务端时间为唯一基准（C-10）
+  - 题目下发必须脱敏，答案只在服务端快照中（NFR-08）
+  - 核心业务数据仅软删除，被引用数据禁止物理删除（C-16）
+  - 答卷总分 = 各题得分之和（NFR-18）
+end note
+
+@enduml
+
+
+@startuml OES-Deployment
+' =====================================================================
+'  在线考试系统（OES）部署架构图
+'  对应设计文档：docs/design/系统设计文档.md §6.4
+' =====================================================================
+
+title 在线考试系统（OES）部署架构图（前后端分离 + MySQL 单机）
+
+skinparam backgroundColor #0B1020
+skinparam defaultFontColor #E2E8F0
+skinparam nodeBackgroundColor #111827
+skinparam nodeBorderColor #A855F7
+skinparam artifactBackgroundColor #10182B
+skinparam artifactBorderColor #22D3EE
+skinparam databaseBackgroundColor #10182B
+skinparam databaseBorderColor #34D399
+skinparam folderBackgroundColor #10182B
+skinparam ArrowColor #22D3EE
+skinparam shadowing false
+skinparam nodesep 20
+skinparam ranksep 60
+
+node "用户终端（PC 浏览器，最小 1280x720）" as CLIENT_NODE {
+  artifact "React 18 SPA（Chrome / Edge / Firefox 最近2版 / Safari 15+）" as BROWSER
+}
+
+node "应用服务器（Linux，Nginx + Node.js）" as APP_NODE {
+  artifact "Nginx 1.24\n:443 HTTPS 终止\n/api/v1 反向代理\n/ 静态资源 dist/" as NGINX
+  artifact "Node.js 18 LTS + Express 4\n:3000 内网监听\n非 root 用户运行\nPM2 进程守护" as NODE
+  artifact "进程内定时任务\n超时交卷 / 判分重放 / 统计刷新 / 备份" as SCHED
+  folder "/var/log/oes\n结构化 JSON 日志（按天滚动）" as LOGDIR
+  folder "/var/www/oes\n前端构建产物" as DIST
+}
+
+node "数据库服务器（同机或独立主机）" as DB_NODE {
+  database "MySQL 8.0\n:3306 仅内网访问\n库 oes / utf8mb4_0900_ai_ci" as MYSQL
+  folder "/var/backups/oes\nmysqldump 逻辑备份（保留最近 7 份）" as BACKUPDIR
+}
+
+cloud "运维与监控" as OPS {
+  [健康检查轮询 /api/v1/health] as HEALTH
+  [日志采集与慢查询告警] as MONITOR
+}
+
+BROWSER --> NGINX : HTTPS 443
+NGINX --> DIST : 静态资源（gzip + 长缓存）
+NGINX --> NODE : /api/v1 反向代理（内网）
+NODE --> MYSQL : mysql2 连接池（参数化查询）
+SCHED --> MYSQL : 定时 SQL（模拟 UPDATE 行锁）
+SCHED --> NODE : 复用 service 层
+NODE --> LOGDIR : 审计与运行日志
+MYSQL --> BACKUPDIR : 每日 02:00 逻辑备份
+HEALTH --> NGINX : GET /api/v1/health
+MONITOR --> LOGDIR : 采集
+
+note right of APP_NODE
+  **部署要点**
+  - 前端与后端同域部署，规避跨域与 Cookie 风险
+  - Node 服务不暴露公网端口，仅 Nginx 可达
+  - 环境变量通过 .env 注入，不入版本库
+  - 数据库账号最小权限（仅 oes 库 DML/DDL 必要权限）
+end note
+
+note bottom of DB_NODE
+  **容量与备份**
+  - 单场考试参考人数上限 500，总用户规模 5000（C-11）
+  - 答卷 100 万行、答题明细 500 万行，暂不分库分表（C-12）
+  - 备份保留 7 份，每月执行 1 次恢复演练
+end note
+
+@enduml

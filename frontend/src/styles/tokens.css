@@ -1,0 +1,108 @@
+/* =========================================================
+ * Design Tokens —— 在线考试系统（OES）
+ * 视觉策略：赛博朋克外壳（深色霓虹） + 简洁内核（浅色高对比）
+ * 所有页面仅引用本文件的变量，禁止散落硬编码色值
+ * ======================================================= */
+:root {
+  /* ---------- 外壳（深色霓虹） ---------- */
+  --oe-bg: #070a12;
+  --oe-bg-grid: rgba(0, 240, 255, 0.055);
+  --oe-surface: #0d1424;
+  --oe-surface-2: #131c31;
+  --oe-surface-3: #1a2540;
+  --oe-border: rgba(0, 240, 255, 0.18);
+  --oe-border-strong: rgba(0, 240, 255, 0.42);
+  --oe-text: #e6edf7;
+  --oe-text-muted: #8b9bb8;
+  --oe-text-dim: #5d6b85;
+
+  /* 霓虹三色（用户指定色值） */
+  --oe-neon-cyan: #00f0ff;
+  --oe-neon-violet: #a855f7;
+  --oe-neon-magenta: #ff2d95;
+  --oe-gradient-brand: linear-gradient(120deg, #00f0ff 0%, #a855f7 52%, #ff2d95 100%);
+  --oe-gradient-soft: linear-gradient(120deg, rgba(0, 240, 255, 0.16), rgba(168, 85, 247, 0.16) 52%, rgba(255, 45, 149, 0.16));
+  --oe-gradient-line: linear-gradient(90deg, transparent, #00f0ff, #a855f7, #ff2d95, transparent);
+
+  /* ---------- 内核（浅色高对比） ---------- */
+  --oe-core-bg: #f4f7fb;
+  --oe-core-surface: #ffffff;
+  --oe-core-surface-2: #f8fafc;
+  --oe-core-text: #0f172a;
+  --oe-core-muted: #52627a;
+  --oe-core-border: #e3e9f2;
+  --oe-core-border-strong: #cbd5e1;
+  /* 内核中的霓虹强调色（低饱和版本，保证对比度） */
+  --oe-accent: #0e7490;
+  --oe-accent-violet: #7c3aed;
+  --oe-accent-magenta: #db2777;
+
+  /* ---------- 语义色 ---------- */
+  --oe-success: #34d399;
+  --oe-success-ink: #047857;
+  --oe-warning: #fbbf24;
+  --oe-warning-ink: #b45309;
+  --oe-danger: #f87171;
+  --oe-danger-ink: #b91c1c;
+  --oe-info: #38bdf8;
+  --oe-info-ink: #0369a1;
+
+  /* ---------- 形状 ---------- */
+  --oe-radius-sm: 6px;
+  --oe-radius-md: 12px;
+  --oe-radius-lg: 20px;
+  --oe-radius-pill: 999px;
+
+  /* ---------- 间距节奏 ---------- */
+  --oe-space-1: 4px;
+  --oe-space-2: 8px;
+  --oe-space-3: 12px;
+  --oe-space-4: 16px;
+  --oe-space-5: 24px;
+  --oe-space-6: 32px;
+  --oe-space-7: 48px;
+  --oe-space-8: 64px;
+
+  /* ---------- 字阶 ---------- */
+  --oe-font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  --oe-font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --oe-text-xs: 12px;
+  --oe-text-sm: 13px;
+  --oe-text-base: 14px;
+  --oe-text-md: 16px;
+  --oe-text-lg: 20px;
+  --oe-text-xl: 24px;
+  --oe-text-2xl: 32px;
+  --oe-text-hero: 44px;
+
+  /* ---------- 阴影与光晕（静态阴影，避免大面积动画） ---------- */
+  --oe-shadow-1: 0 2px 8px rgba(9, 18, 38, 0.08);
+  --oe-shadow-2: 0 10px 30px rgba(9, 18, 38, 0.12);
+  --oe-shadow-3: 0 24px 60px rgba(4, 8, 18, 0.55);
+  --oe-glow-cyan: 0 0 12px rgba(0, 240, 255, 0.45);
+  --oe-glow-violet: 0 0 16px rgba(168, 85, 247, 0.4);
+  --oe-glow-magenta: 0 0 16px rgba(255, 45, 149, 0.35);
+
+  /* ---------- 动效 ---------- */
+  --oe-transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  --oe-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---------- 布局 ---------- */
+  --oe-sidebar-w: 236px;
+  --oe-topbar-h: 64px;
+  --oe-content-max: 1440px;
+}
+
+/* 尊重系统减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --oe-transition: 0ms linear;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

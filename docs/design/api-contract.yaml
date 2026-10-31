@@ -1,0 +1,5928 @@
+openapi: 3.0.3
+info:
+  title: 在线考试系统（OES）RESTful API 契约
+  version: 1.0.0
+  description: |
+    在线考试系统（Online Examination System, OES）前后端绑定契约。上游依据为
+    `docs/requirements/需求规格说明书.md` V1.0（53 条 REQ + 18 条 NFR）与
+    `docs/requirements/需求追踪矩阵.md` V1.0，下游供后端实现与前端联调使用。
+
+    ## 全局约定
+    - **接口前缀**：所有路径均以 `/api/v1` 开头。
+    - **统一响应体**：`{ "code": 0, "message": "ok", "data": ... }`。`code = 0` 表示成功，
+      非 0 为业务错误码（详见 `docs/design/系统设计文档.md` §5.4 错误码表）。
+      HTTP 状态码同时表达语义（200/201/400/401/403/404/409/422/500）。
+    - **分页结构**：`{ "list": [], "total": 0, "page": 1, "pageSize": 20 }`，
+      查询参数统一为 `page`（从 1 开始）、`pageSize`（1~100，默认 20）。
+    - **字段命名**：JSON 一律 lowerCamelCase；数据库列一律 snake_case。
+    - **鉴权头**：`Authorization: Bearer <accessToken>`（JWT HS256，有效期 2 小时）。
+      刷新令牌走请求体，不放 URL。
+    - **题目脱敏**：任何面向学生的考试接口（取题、恢复、暂存回显）**不得**返回
+      `correctAnswer`、`analysis`、`scoringPoints` 字段；仅交卷并发布成绩后，
+      成绩详情接口才可返回标准答案与解析。
+    - **数据权限**：服务端在功能权限（RBAC）之外，必须叠加数据权限（教师仅本人题库/
+      试卷/考试/答卷；学生仅本人答卷与成绩），越权返回 403。
+    - **时间**：所有时间为 UTC 的 ISO-8601 字符串（如 `2026-11-10T01:00:00.000Z`），
+      前端按 Asia/Shanghai 展示；考试剩余时间只认服务端返回值。
+    - **幂等**：`POST /attempts/{attemptId}/submit` 与答案暂存接口天然幂等，
+      重复调用返回首次结果，不产生重复判分记录。
+  contact:
+    name: 系统架构组（陈工）
+    email: architect@oes.edu.cn
+  license:
+    name: 本科毕业设计内部使用
+servers:
+  - url: http://localhost:3000
+    description: 本地开发环境（Vite 代理 /api 到该地址）
+  - url: https://oes.example.edu.cn
+    description: 生产环境（Nginx 反向代理 + HTTPS）
+
+tags:
+  - name: 认证与账号
+    description: 登录、令牌刷新与轮换、登出、本人资料与密码（REQ-UAM-01~07）
+  - name: 用户与权限管理
+    description: 账号管理、注册审批、角色与权限分配、班级字典（REQ-UAM-05/06/08/09）
+  - name: 知识点
+    description: 两级知识点维护与查询（REQ-QBM-07）
+  - name: 题库与题目
+    description: 题库、题目增删改查、版本、批量导入导出、删除保护、重判（REQ-QBM-01~06、REQ-MRK-07）
+  - name: 试卷与组卷
+    description: 手动/随机组卷、分值校验、预览、复制、锁定归档、检索（REQ-PPM-01~07）
+  - name: 考试管理
+    description: 创建、发布、变更、补考授权、监控与防作弊事件（REQ-EXM-01/02/09/10）
+  - name: 在线答题
+    description: 资格校验、开考、取题（脱敏）、答案暂存、服务端计时、交卷、断线恢复（REQ-EXM-03~08）
+  - name: 阅卷与复核
+    description: 主观题阅卷队列、人工评分、双评仲裁、阅卷进度、成绩复核申诉（REQ-MRK-02~06）
+  - name: 成绩与统计
+    description: 个人成绩、成绩发布与导出、单场统计、题目质量、趋势与知识点分析（REQ-STA-01~06、REQ-MRK-05）
+  - name: 系统管理
+    description: 系统参数、审计日志、公告、站内通知、备份、健康检查（REQ-SYS-01~06）
+
+paths:
+  # ===================================================================
+  # 一、认证与账号（REQ-UAM-01 ~ REQ-UAM-07）
+  # ===================================================================
+  /api/v1/auth/register:
+    post:
+      tags: [认证与账号]
+      summary: 学生注册申请
+      description: 访客提交注册申请，创建 status=pending 的账号；管理员审核通过前不可登录（REQ-UAM-06）。
+      operationId: registerStudent
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: 申请受理成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          userId:
+                            type: integer
+                            format: int64
+                          status:
+                            type: string
+                            example: pending
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/auth/login:
+    post:
+      tags: [认证与账号]
+      summary: 账号登录
+      description: |
+        校验用户名、密码、图形验证码与账号状态；连续失败 5 次锁定 15 分钟（REQ-UAM-02）。
+        成功返回 Access Token（2h）与 Refresh Token（7d），并按角色返回工作台路由。
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LoginResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '423':
+          description: 账号已被锁定，返回剩余锁定秒数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [认证与账号]
+      summary: 令牌刷新与轮换
+      description: 校验 Refresh Token 签名、白名单状态与用户状态，签发新令牌对并立即使旧 Refresh Token 失效（REQ-UAM-03）。
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Tokens'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout:
+    post:
+      tags: [认证与账号]
+      summary: 安全登出
+      description: 吊销当前 Refresh Token 并写入登出审计事件（REQ-UAM-04）。
+      operationId: logout
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+                  description: 需要吊销的刷新令牌；缺省时吊销当前用户全部刷新令牌
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/me:
+    get:
+      tags: [认证与账号]
+      summary: 获取当前用户信息与权限点
+      description: 前端据此渲染菜单与路由守卫；真正的权限校验仍在服务端执行。
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/profile:
+    put:
+      tags: [认证与账号]
+      summary: 修改本人资料
+      description: 仅能修改本人姓名、邮箱、手机号；邮箱需唯一（REQ-UAM-07）。
+      operationId: updateProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/password:
+    put:
+      tags: [认证与账号]
+      summary: 修改本人密码
+      description: |
+        校验旧密码与新密码强度（≥8 位，含大小写字母与数字）；更新 bcrypt 哈希、
+        token_version +1 并吊销全部 Refresh Token，要求重新登录（REQ-UAM-07）。
+      operationId: changePassword
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ===================================================================
+  # 二、用户与权限管理（REQ-UAM-05/06/08/09）
+  # ===================================================================
+  /api/v1/users:
+    get:
+      tags: [用户与权限管理]
+      summary: 分页查询用户
+      description: 仅管理员；支持按角色、状态、班级、关键词过滤。
+      operationId: listUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/KeywordParam'
+        - name: roleCode
+          in: query
+          schema:
+            type: string
+            enum: [admin, teacher, student]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, active, disabled, locked]
+        - name: classId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [用户与权限管理]
+      summary: 创建用户
+      description: 管理员创建账号；用户名与邮箱唯一；系统生成初始随机密码并仅返回一次（REQ-UAM-05）。
+      operationId: createUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user:
+                            $ref: '#/components/schemas/User'
+                          initialPassword:
+                            type: string
+                            description: 初始密码，仅本次响应返回，不落日志
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/users/pending:
+    get:
+      tags: [用户与权限管理]
+      summary: 待审核注册申请列表
+      operationId: listPendingRegistrations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    get:
+      tags: [用户与权限管理]
+      summary: 查询用户详情
+      operationId: getUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [用户与权限管理]
+      summary: 编辑用户
+      operationId: updateUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/users/{userId}/status:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    patch:
+      tags: [用户与权限管理]
+      summary: 启用或禁用账号
+      description: 禁用后立即拒绝登录与已签发令牌的后续请求，但完整保留历史考试数据（REQ-UAM-09）。
+      operationId: updateUserStatus
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserStatusRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{userId}/role:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    patch:
+      tags: [用户与权限管理]
+      summary: 调整用户角色与权限点
+      description: 更新 RBAC 映射并使旧令牌失效（token_version +1），下一次请求按新权限判定（REQ-UAM-08）。
+      operationId: updateUserRole
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{userId}/reset-password:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    post:
+      tags: [用户与权限管理]
+      summary: 重置用户密码
+      description: 生成一次性临时密码并返回，同时吊销该用户全部 Refresh Token。
+      operationId: resetUserPassword
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 重置成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          temporaryPassword:
+                            type: string
+                            description: 临时密码，仅本次响应返回
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{userId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    post:
+      tags: [用户与权限管理]
+      summary: 审核通过注册申请
+      operationId: approveRegistration
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/users/{userId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    post:
+      tags: [用户与权限管理]
+      summary: 驳回注册申请
+      operationId: rejectRegistration
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/roles:
+    get:
+      tags: [用户与权限管理]
+      summary: 查询角色列表
+      operationId: listRoles
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Role'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/permissions:
+    get:
+      tags: [用户与权限管理]
+      summary: 查询权限点全量清单
+      operationId: listPermissions
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Permission'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/classes:
+    get:
+      tags: [用户与权限管理]
+      summary: 查询班级列表
+      description: 用于考试参考范围与成绩班级维度筛选。
+      operationId: listClasses
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ClassInfo'
+    post:
+      tags: [用户与权限管理]
+      summary: 新增班级
+      operationId: createClass
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ClassInfo'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===================================================================
+  # 三、知识点（REQ-QBM-07）
+  # ===================================================================
+  /api/v1/knowledge-points:
+    get:
+      tags: [知识点]
+      summary: 查询知识点树
+      description: 返回两级知识点树；默认仅返回 active，可显式包含归档节点。
+      operationId: listKnowledgePoints
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: includeArchived
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/KnowledgePointNode'
+    post:
+      tags: [知识点]
+      summary: 新增知识点
+      description: 仅管理员；支持一级与二级（parentId 为空即一级）。
+      operationId: createKnowledgePoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KnowledgePointRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/KnowledgePoint'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/knowledge-points/{kpId}:
+    parameters:
+      - $ref: '#/components/parameters/KnowledgePointIdPath'
+    put:
+      tags: [知识点]
+      summary: 重命名或调整知识点
+      operationId: updateKnowledgePoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KnowledgePointRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/knowledge-points/{kpId}/status:
+    parameters:
+      - $ref: '#/components/parameters/KnowledgePointIdPath'
+    patch:
+      tags: [知识点]
+      summary: 启用或归档知识点
+      description: 已被题目引用的知识点禁止物理删除，仅可归档（REQ-QBM-07）。
+      operationId: updateKnowledgePointStatus
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, archived]
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===================================================================
+  # 四、题库与题目（REQ-QBM-01 ~ REQ-QBM-06）
+  # ===================================================================
+  /api/v1/question-banks:
+    get:
+      tags: [题库与题目]
+      summary: 查询题库列表
+      description: 教师仅返回本人创建或被授权的题库；管理员返回全量。
+      operationId: listQuestionBanks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/KeywordParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionBankPage'
+    post:
+      tags: [题库与题目]
+      summary: 创建题库
+      operationId: createQuestionBank
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionBankRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionBank'
+
+  /api/v1/question-banks/{bankId}:
+    parameters:
+      - $ref: '#/components/parameters/BankIdPath'
+    put:
+      tags: [题库与题目]
+      summary: 编辑题库
+      operationId: updateQuestionBank
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionBankRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [题库与题目]
+      summary: 删除题库
+      description: 软删除；库内仍有题目或被试卷引用时返回 409 并给出原因。
+      operationId: deleteQuestionBank
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/question-banks/{bankId}/authorizations:
+    parameters:
+      - $ref: '#/components/parameters/BankIdPath'
+    post:
+      tags: [题库与题目]
+      summary: 授权其他教师访问题库
+      operationId: authorizeQuestionBank
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAuthorizationRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/questions:
+    get:
+      tags: [题库与题目]
+      summary: 分页检索题目
+      description: |
+        多条件检索（关键词/题型/难度/知识点/题库/创建人），默认每页 20 条，
+        列表查询 P95 ≤ 500ms（REQ-QBM-04、NFR-05）。
+      operationId: listQuestions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/KeywordParam'
+        - name: bankId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: questionType
+          in: query
+          schema:
+            type: string
+            enum: [single, multiple, judge, fill, short]
+        - name: difficulty
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+        - name: knowledgePointId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: createdBy
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, archived]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [题库与题目]
+      summary: 新增题目
+      description: |
+        按题型校验必填项与答案合法性：单选答案唯一、多选答案集合非空、判断为布尔、
+        填空答案非空、简答需采分点。保存同时写入第 1 版版本快照（REQ-QBM-01/02）。
+      operationId: createQuestion
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/questions/{questionId}:
+    parameters:
+      - $ref: '#/components/parameters/QuestionIdPath'
+    get:
+      tags: [题库与题目]
+      summary: 查询题目详情
+      description: 教师端可见标准答案与解析；学生角色不可调用本接口。
+      operationId: getQuestion
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Question'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [题库与题目]
+      summary: 编辑题目并生成版本记录
+      description: 已开始考试的题目快照不受影响；系统保存变更前后快照（REQ-QBM-02）。
+      operationId: updateQuestion
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          questionId:
+                            type: integer
+                            format: int64
+                          version:
+                            type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [题库与题目]
+      summary: 删除题目（软删除 + 引用保护）
+      description: 已被未归档试卷或进行中考试引用时拒绝删除，返回引用清单（REQ-QBM-03）。
+      operationId: deleteQuestion
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 题目被引用，返回引用清单
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionReferences'
+
+  /api/v1/questions/{questionId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/QuestionIdPath'
+    get:
+      tags: [题库与题目]
+      summary: 查询题目版本历史
+      operationId: listQuestionVersions
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/QuestionVersion'
+
+  /api/v1/questions/{questionId}/references:
+    parameters:
+      - $ref: '#/components/parameters/QuestionIdPath'
+    get:
+      tags: [题库与题目]
+      summary: 查询题目引用清单
+      description: 删除保护前置检查，返回引用该题的试卷与考试。
+      operationId: getQuestionReferences
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionReferences'
+
+  /api/v1/questions/import:
+    post:
+      tags: [题库与题目]
+      summary: 批量导入题目
+      description: |
+        上传 Excel/CSV（≤5000 行），逐行校验题型、答案与分值，返回成功条数与失败明细
+        （行号 + 原因），整批在一个事务内完成（REQ-QBM-05）。
+      operationId: importQuestions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, bankId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Excel(.xlsx) 或 CSV 文件
+                bankId:
+                  type: integer
+                  format: int64
+                knowledgePointId:
+                  type: integer
+                  format: int64
+                  description: 可选的默认知识点
+                defaultScore:
+                  type: number
+                  format: float
+      responses:
+        '200':
+          description: 导入完成（可能部分失败）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/questions/export:
+    get:
+      tags: [题库与题目]
+      summary: 导出题库
+      description: 按筛选条件生成含答案与解析的 Excel；导出行为写入审计日志（REQ-QBM-06）。
+      operationId: exportQuestions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bankId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: questionType
+          in: query
+          schema:
+            type: string
+            enum: [single, multiple, judge, fill, short]
+        - name: knowledgePointId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Excel 文件流
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/questions/{questionId}/rejudge:
+    parameters:
+      - $ref: '#/components/parameters/QuestionIdPath'
+    post:
+      tags: [题库与题目]
+      summary: 修正标准答案并批量重判
+      description: |
+        仅管理员。仅重算引用该题答卷的客观分与总分，主观题人工得分保持不变；
+        全量写入 mk_grade_change_log 与审计日志（REQ-MRK-07）。
+      operationId: rejudgeQuestion
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejudgeRequest'
+      responses:
+        '200':
+          description: 重判完成
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RejudgeResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+# ===================================================================
+  # 五、试卷与组卷（REQ-PPM-01 ~ REQ-PPM-07）
+  # ===================================================================
+  /api/v1/papers:
+    get:
+      tags: [试卷与组卷]
+      summary: 分页检索试卷
+      description: 教师仅见本人试卷；返回题数、总分与已使用次数（REQ-PPM-07）。
+      operationId: listPapers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/KeywordParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, locked, archived]
+        - name: examId
+          in: query
+          schema:
+            type: integer
+            format: int64
+          description: 按关联考试过滤
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperPage'
+    post:
+      tags: [试卷与组卷]
+      summary: 创建试卷并手动组卷
+      description: |
+        逐题加入题目，实时累计题数与总分，保存题目顺序与每题分值；
+        试卷至少包含 1 道题，且各题分值之和须等于设定总分（REQ-PPM-01/03）。
+      operationId: createPaper
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaperCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/papers/random:
+    post:
+      tags: [试卷与组卷]
+      summary: 规则化随机组卷
+      description: |
+        按题型数量、难度比例与知识点范围无重复抽题生成草稿；
+        可用题目不足时返回各维度缺口明细，且不生成残缺试卷（REQ-PPM-02）。
+      operationId: randomAssemblePaper
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RandomPaperRequest'
+      responses:
+        '200':
+          description: 组卷成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RandomPaperResult'
+        '409':
+          description: 可用题目不足，返回缺口明细（不生成试卷）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          shortages:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/ShortageItem'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/papers/{paperId}:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+    get:
+      tags: [试卷与组卷]
+      summary: 查询试卷详情
+      operationId: getPaper
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [试卷与组卷]
+      summary: 编辑试卷基本信息
+      description: 锁定（被考试引用）状态下仅允许修改名称与说明，修改题目与分值返回 409（REQ-PPM-06）。
+      operationId: updatePaper
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaperUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [试卷与组卷]
+      summary: 删除试卷
+      description: 软删除；已被考试引用时返回 409。
+      operationId: deletePaper
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/papers/{paperId}/questions:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+    post:
+      tags: [试卷与组卷]
+      summary: 向试卷追加题目
+      description: 追加后重新校验总分；重复题目返回 409（REQ-PPM-01/03）。
+      operationId: addPaperQuestions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaperQuestionAddRequest'
+      responses:
+        '200':
+          description: 追加成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperDetail'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    put:
+      tags: [试卷与组卷]
+      summary: 批量调整题目顺序与分值
+      description: 整体重写顺序与分值；校验分值之和等于总分（REQ-PPM-03）。
+      operationId: updatePaperQuestions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaperQuestionUpdateRequest'
+      responses:
+        '200':
+          description: 调整成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperDetail'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/papers/{paperId}/questions/{paperQuestionId}:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+      - name: paperQuestionId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    delete:
+      tags: [试卷与组卷]
+      summary: 从试卷移除题目
+      operationId: removePaperQuestion
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/papers/{paperId}/preview:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+    get:
+      tags: [试卷与组卷]
+      summary: 以考生视角预览试卷
+      description: 渲染题号、题干、选项、分值与答题控件；**不返回**标准答案与解析（REQ-PPM-04、NFR-08）。
+      operationId: previewPaper
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperPreview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/papers/{paperId}/copy:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+    post:
+      tags: [试卷与组卷]
+      summary: 复制试卷
+      description: 生成独立新试卷（题目引用共享，顺序与分值可独立编辑），原试卷不变（REQ-PPM-05）。
+      operationId: copyPaper
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paperName]
+              properties:
+                paperName:
+                  type: string
+                  maxLength: 128
+      responses:
+        '201':
+          description: 复制成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PaperDetail'
+
+  /api/v1/papers/{paperId}/status:
+    parameters:
+      - $ref: '#/components/parameters/PaperIdPath'
+    patch:
+      tags: [试卷与组卷]
+      summary: 试卷锁定或归档
+      description: 被考试引用自动锁定；归档仅管理员可执行，归档后不可用于新建考试（REQ-PPM-06）。
+      operationId: updatePaperStatus
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [published, locked, archived]
+                reason:
+                  type: string
+                  maxLength: 255
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ===================================================================
+  # 六、考试管理（REQ-EXM-01/02/10）
+  # ===================================================================
+  /api/v1/exams:
+    get:
+      tags: [考试管理]
+      summary: 分页查询考试
+      description: 教师仅见本人创建考试，管理员见全量。
+      operationId: listExams
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - $ref: '#/components/parameters/KeywordParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, ongoing, finished, cancelled, archived]
+        - name: scoreStatus
+          in: query
+          schema:
+            type: string
+            enum: [unpublished, published]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamPage'
+    post:
+      tags: [考试管理]
+      summary: 创建考试（草稿）
+      description: |
+        校验结束时间晚于开始时间、答题时长不超过考试窗口长度；参考范围支持班级或指定学生（REQ-EXM-01）。
+      operationId: createExam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExamCreateRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/exams/available:
+    get:
+      tags: [考试管理]
+      summary: 学生可参加的考试列表
+      description: 仅返回分配给本人且处于考试窗口内或即将开始的考试，附带剩余作答次数（REQ-EXM-02/03）。
+      operationId: listAvailableExams
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/StudentExamPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [考试管理]
+      summary: 查询考试详情
+      operationId: getExam
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [考试管理]
+      summary: 编辑考试
+      description: 已发布考试仅允许延期、调整说明等白名单字段（REQ-EXM-10）。
+      operationId: updateExam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExamUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/exams/{examId}/publish:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    post:
+      tags: [考试管理]
+      summary: 发布考试
+      description: 状态置为 published，按参考范围展开生成考试任务并推送站内通知（REQ-EXM-02）。
+      operationId: publishExam
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 发布成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamPublishResult'
+        '409':
+          description: 状态不允许发布（无参考学生、试卷未锁定等）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/exams/{examId}/status:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    patch:
+      tags: [考试管理]
+      summary: 考试延期、取消或归档
+      description: 变更合法性与通知受影响学生（REQ-EXM-10）。
+      operationId: updateExamStatus
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExamStatusRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/exams/{examId}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [考试管理]
+      summary: 查询考试任务（参考学生与作答状态）
+      operationId: listExamTasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, doing, submitted, missed]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamTaskPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}/grants:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    post:
+      tags: [考试管理]
+      summary: 为指定学生增加作答次数（补考授权）
+      description: 校验学生未超过次数上限，成功后同步通知学生（REQ-EXM-10）。
+      operationId: grantExtraAttempts
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExamGrantRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/exams/{examId}/monitor:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [考试管理]
+      summary: 考试监控看板
+      description: 返回应考/作答中/已交卷/缺考人数与异常答卷列表（REQ-EXM-09，权限矩阵第 17 项）。
+      operationId: getExamMonitor
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamMonitor'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}/anti-cheat-events:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [考试管理]
+      summary: 查询防作弊事件
+      description: 教师仅可见本人考试；按答卷与学生聚合展示累计次数。
+      operationId: listAntiCheatEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: eventType
+          in: query
+          schema:
+            type: string
+            enum: [switch_screen, exit_fullscreen, copy_paste, multi_device, blur]
+        - name: attemptId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AntiCheatEventPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===================================================================
+  # 七、在线答题（REQ-EXM-03 ~ REQ-EXM-08）
+  # ===================================================================
+  /api/v1/exams/{examId}/attempts:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    post:
+      tags: [在线答题]
+      summary: 开考（考生资格校验 + 生成答卷）
+      description: |
+        依次校验参考名单、考试窗口、剩余作答次数；任一不满足返回具体拒绝原因且不下发试题。
+        通过后创建唯一答卷，以**服务端时间**计算 deadline（REQ-EXM-03/04/06）。
+        重复开考（已有 ongoing 答卷）返回该答卷，不重复计时（REQ-EXM-08）。
+      operationId: startAttempt
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deviceKey:
+                  type: string
+                  maxLength: 64
+                  description: 浏览器设备指纹，用于多端并发登录检测
+      responses:
+        '200':
+          description: 已存在进行中答卷，直接恢复
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AttemptSession'
+        '201':
+          description: 开考成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AttemptSession'
+        '403':
+          description: 不在参考名单或超出作答次数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 不在考试窗口内 / 考试未发布 / 已完成全部作答次数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/attempts/{attemptId}:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    get:
+      tags: [在线答题]
+      summary: 恢复答卷会话（断线重连）
+      description: |
+        校验答卷归属（仅本人），返回剩余秒数、已保存答案与题目（脱敏），
+        不重复计时、不丢失已暂存内容（REQ-EXM-08、NFR-11）。
+      operationId: recoverAttempt
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AttemptSession'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/attempts/{attemptId}/questions:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    get:
+      tags: [在线答题]
+      summary: 获取答卷题目（已脱敏）
+      description: |
+        返回顺序按 shuffle 配置固定；响应中**绝不包含** correctAnswer、analysis、
+        scoringPoints 字段（REQ-EXM-04、NFR-08 答案保护）。
+      operationId: getAttemptQuestions
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          attemptId:
+                            type: integer
+                            format: int64
+                          remainingSeconds:
+                            type: integer
+                          serverTime:
+                            type: string
+                            format: date-time
+                          questions:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/AttemptQuestion'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 答卷已交卷，禁止取题
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/attempts/{attemptId}/remaining-time:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    get:
+      tags: [在线答题]
+      summary: 服务端权威计时校准
+      description: 前端每 30 秒调用一次；返回剩余秒数与服务端时间戳，客户端倒计时仅用于展示（REQ-EXM-06）。
+      operationId: getRemainingTime
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RemainingTime'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/attempts/{attemptId}/answers:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    put:
+      tags: [在线答题]
+      summary: 答案暂存（增量幂等）
+      description: |
+        支持单题或批量提交；按 (attemptId, questionId) UPSERT，answerVersion 乐观锁防并发覆盖；
+        保存动作不影响考试计时（REQ-EXM-05）。答卷已交卷时返回 409。
+      operationId: saveAnswers
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerSaveRequest'
+      responses:
+        '200':
+          description: 暂存成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          savedAt:
+                            type: string
+                            format: date-time
+                          savedCount:
+                            type: integer
+                          remainingSeconds:
+                            type: integer
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/attempts/{attemptId}/cheat-events:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    post:
+      tags: [在线答题]
+      summary: 上报防作弊事件
+      description: |
+        记录切屏、退出全屏、复制粘贴、多端登录等事件；服务端累加次数，
+        超过考试配置阈值时把答卷标记为异常并通知监考教师（REQ-EXM-09）。
+      operationId: reportAntiCheatEvent
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AntiCheatEventRequest'
+      responses:
+        '200':
+          description: 已记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cumulativeCount:
+                            type: integer
+                          isAbnormal:
+                            type: boolean
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/attempts/{attemptId}/submit:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    post:
+      tags: [在线答题]
+      summary: 交卷（幂等）
+      description: |
+        固化答卷快照、禁止继续作答、写入交卷时间并触发自动判分。
+        **幂等**：重复提交（含并发）返回同一结果与同一 gradingTaskId，不产生重复判分记录
+        （REQ-EXM-07、NFR-13）。超时场景由服务端定时任务以 submitType=timeout 调用同一逻辑。
+      operationId: submitAttempt
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                submitType:
+                  type: string
+                  enum: [manual, timeout]
+                  default: manual
+      responses:
+        '200':
+          description: 交卷成功（或已交卷，返回首次结果）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SubmitResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 答卷不可交卷（状态异常）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/attempts/{attemptId}/grade:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    post:
+      tags: [在线答题]
+      summary: 触发或重放自动判分
+      description: |
+        仅管理员可用。判分逻辑可重放且结果一致：先清除该答卷既有客观分再按快照重算，
+        主观题人工得分保持不变（REQ-MRK-01、NFR-13）。
+      operationId: gradeAttempt
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 判分完成
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradeResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+# ===================================================================
+  # 八、阅卷与复核（REQ-MRK-02 ~ REQ-MRK-06）
+  # ===================================================================
+  /api/v1/grading-tasks:
+    get:
+      tags: [阅卷与复核]
+      summary: 查询阅卷任务队列
+      description: |
+        教师仅可见本人考试答卷；支持按考试、状态、阅卷人过滤，返回待阅数量与队列顺序
+        （REQ-MRK-02）。学生与无权限角色返回 403。
+      operationId: listGradingTasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: examId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, first_done, second_pending, arbitration, done]
+        - name: assigneeId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradingTaskPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/grading-tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdPath'
+    get:
+      tags: [阅卷与复核]
+      summary: 查询阅卷任务详情（含考生答案与参考答案）
+      description: 通过此接口教师可见该题的正确答案与解析；仅限有权阅卷的教师。
+      operationId: getGradingTask
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradingTaskDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/grading-tasks/{taskId}/score:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdPath'
+    post:
+      tags: [阅卷与复核]
+      summary: 提交人工评分
+      description: |
+        得分须在 0~该题满分区间；支持按采分点给分并填写评语，保存后实时回写答卷总分。
+        双评模式下第二评与第一评分差超过满分 20% 时自动转入仲裁（REQ-MRK-03/04）。
+      operationId: scoreGradingTask
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreSubmitRequest'
+      responses:
+        '200':
+          description: 评分成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradeResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/grading-tasks/{taskId}/arbitrate:
+    parameters:
+      - $ref: '#/components/parameters/TaskIdPath'
+    post:
+      tags: [阅卷与复核]
+      summary: 评分争议仲裁
+      description: 管理员或被指定教研组长裁定最终得分，记录三方评分痕迹（REQ-MRK-04）。
+      operationId: arbitrateGradingTask
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArbitrateRequest'
+      responses:
+        '200':
+          description: 仲裁完成
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradeResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/exams/{examId}/grading-progress:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [阅卷与复核]
+      summary: 阅卷进度看板
+      description: 返回总答卷数、已阅数、待阅数、完成率与按阅卷人维度的工作量（REQ-MRK-06）。
+      operationId: getGradingProgress
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradingProgress'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===================================================================
+  # 九、成绩与统计（REQ-STA-01 ~ REQ-STA-07、REQ-MRK-05）
+  # ===================================================================
+  /api/v1/my/grades:
+    get:
+      tags: [成绩与统计]
+      summary: 我的成绩列表
+      description: 学生仅返回本人；未发布成绩显示"评阅中"状态且不含具体分数（REQ-STA-01/05）。
+      operationId: listMyGrades
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradePage'
+
+  /api/v1/my/grades/export:
+    get:
+      tags: [成绩与统计]
+      summary: 导出本人成绩单
+      description: 学生仅可导出本人成绩单（PR 矩阵第 25 项）。
+      operationId: exportMyGrades
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Excel 文件流
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  /api/v1/my/grades/{attemptId}:
+    parameters:
+      - $ref: '#/components/parameters/AttemptIdPath'
+    get:
+      tags: [成绩与统计]
+      summary: 我的成绩详情（逐题得分）
+      description: |
+        仅在成绩已发布时返回具体分数、逐题得分、标准答案、解析与教师评语；
+        未发布或非本人答卷返回 403/404（REQ-STA-01）。
+      operationId: getMyGradeDetail
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GradeDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/exams/{examId}/scores:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [成绩与统计]
+      summary: 考试成绩列表
+      description: 教师/管理员按数据权限查询，含学号、姓名、总分、分项得分与排名（REQ-STA-06）。
+      operationId: listExamScores
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: classId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [totalScore, submittedAt]
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamScorePage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}/scores/export:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [成绩与统计]
+      summary: 导出考试成绩表
+      description: 生成含学号、姓名、总分、分项得分与排名的 Excel，并写入审计日志（REQ-STA-06）。
+      operationId: exportExamScores
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: classId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Excel 文件流
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}/publish-scores:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    post:
+      tags: [成绩与统计]
+      summary: 发布成绩
+      description: 校验阅卷完成情况，将 scoreStatus 置为 published 并通知参考学生；发布前学生仅见"评阅中"（REQ-STA-05）。
+      operationId: publishScores
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 发布成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          examId:
+                            type: integer
+                            format: int64
+                          scoreStatus:
+                            type: string
+                            example: published
+                          publishedAt:
+                            type: string
+                            format: date-time
+                          notifiedCount:
+                            type: integer
+        '409':
+          description: 仍有主观题未阅完，拒绝发布
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/exams/{examId}/statistics:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [成绩与统计]
+      summary: 单场考试统计
+      description: |
+        返回参考人数、缺考人数、交卷率、平均分、最高/最低分、标准差、及格率与分数段分布；
+        数据随交卷与阅卷实时刷新（REQ-STA-02，10 万答卷规模响应 ≤3s，NFR-04）。
+      operationId: getExamStatistics
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ExamStatistics'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/exams/{examId}/question-analysis:
+    parameters:
+      - $ref: '#/components/parameters/ExamIdPath'
+    get:
+      tags: [成绩与统计]
+      summary: 题目质量分析
+      description: 逐题返回正确率、平均得分率、难度系数与区分度（前后 27% 分组法），并标记异常题（REQ-STA-03）。
+      operationId: getQuestionAnalysis
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuestionAnalysisResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/statistics/trends:
+    get:
+      tags: [成绩与统计]
+      summary: 多场次趋势与对比分析
+      description: 输入多场考试或多个班级，返回平均分、及格率、优秀率时间序列（REQ-STA-04、REQ-STA-07）。
+      operationId: getTrendStatistics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: examIds
+          in: query
+          required: true
+          description: 考试ID列表，逗号分隔
+          schema:
+            type: string
+            example: 1,2,3
+        - name: classIds
+          in: query
+          description: 班级ID列表，逗号分隔
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TrendResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/statistics/knowledge-points:
+    get:
+      tags: [成绩与统计]
+      summary: 知识点失分分布
+      description: 按知识点维度聚合失分率，用于定位教学薄弱环节（REQ-STA-04）。
+      operationId: getKnowledgePointStatistics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: examId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/KnowledgePointStat'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/appeals:
+    get:
+      tags: [成绩与统计]
+      summary: 查询成绩复核申诉
+      description: 学生仅见本人申诉；教师见本人考试申诉；管理员见全量（REQ-MRK-05）。
+      operationId: listAppeals
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: examId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, rejected, closed]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AppealPage'
+    post:
+      tags: [成绩与统计]
+      summary: 发起成绩复核申诉
+      description: |
+        仅成绩已发布且在申诉期内可发起；需选择题目并填写理由，生成复核工单并通知任课教师
+        （REQ-MRK-05）。
+      operationId: createAppeal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppealCreateRequest'
+      responses:
+        '201':
+          description: 申诉受理成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Appeal'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/appeals/{appealId}/handle:
+    parameters:
+      - $ref: '#/components/parameters/AppealIdPath'
+    post:
+      tags: [成绩与统计]
+      summary: 处理成绩复核申诉
+      description: 回写成绩时须保留修改前后值、复核人与复核理由（REQ-MRK-05、NFR-18）。
+      operationId: handleAppeal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppealHandleRequest'
+      responses:
+        '200':
+          description: 处理完成
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Appeal'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ===================================================================
+  # 十、系统管理（REQ-SYS-01 ~ REQ-SYS-06）
+  # ===================================================================
+  /api/v1/configs:
+    get:
+      tags: [系统管理]
+      summary: 查询系统参数
+      operationId: listConfigs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group
+          in: query
+          schema:
+            type: string
+            enum: [exam, security, grading, system]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ConfigItem'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/configs/{configKey}:
+    parameters:
+      - $ref: '#/components/parameters/ConfigKeyPath'
+    put:
+      tags: [系统管理]
+      summary: 修改系统参数
+      description: 校验取值范围、即时生效并写入审计日志；isEditable=false 的参数拒绝修改（REQ-SYS-01）。
+      operationId: updateConfig
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/audit-logs:
+    get:
+      tags: [系统管理]
+      summary: 检索审计日志
+      description: 仅管理员；默认查询最近 30 天，支持时间范围、操作人、动作与结果过滤（REQ-SYS-03）。
+      operationId: listAuditLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: startTime
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endTime
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: userId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: module
+          in: query
+          schema:
+            type: string
+            enum: [uam, qbm, ppm, exm, mrk, sta, sys]
+        - name: result
+          in: query
+          schema:
+            type: string
+            enum: [success, failure]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuditLogPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/audit-logs/export:
+    get:
+      tags: [系统管理]
+      summary: 导出审计日志
+      operationId: exportAuditLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startTime
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endTime
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: CSV 文件流
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/notices:
+    get:
+      tags: [系统管理]
+      summary: 查询系统公告
+      description: 按当前角色与有效期过滤，三类角色均可见（权限矩阵第 28 项）。
+      operationId: listNotices
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NoticePage'
+    post:
+      tags: [系统管理]
+      summary: 发布公告
+      operationId: createNotice
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoticeRequest'
+      responses:
+        '201':
+          description: 发布成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Notice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/notices/{noticeId}:
+    parameters:
+      - $ref: '#/components/parameters/NoticeIdPath'
+    put:
+      tags: [系统管理]
+      summary: 编辑公告
+      operationId: updateNotice
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoticeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [系统管理]
+      summary: 下线并删除公告
+      operationId: deleteNotice
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/notifications:
+    get:
+      tags: [系统管理]
+      summary: 我的站内通知
+      operationId: listNotifications
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: isRead
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/NotificationPage'
+
+  /api/v1/notifications/{notificationId}/read:
+    parameters:
+      - name: notificationId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    patch:
+      tags: [系统管理]
+      summary: 标记通知已读
+      operationId: markNotificationRead
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Ok'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/backups:
+    get:
+      tags: [系统管理]
+      summary: 查询备份记录
+      operationId: listBackups
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BackupPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [系统管理]
+      summary: 手动触发备份
+      description: 调用 mysqldump 逻辑备份，保留最近 7 份，并写入备份记录与审计日志（REQ-SYS-05）。
+      operationId: triggerBackup
+      security:
+        - bearerAuth: []
+      responses:
+        '202':
+          description: 备份任务已受理（异步执行）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BackupRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/health:
+    get:
+      tags: [系统管理]
+      summary: 系统健康检查
+      description: 返回服务状态、数据库连通性、版本号与服务器当前时间；响应时间 ≤200ms（REQ-SYS-06）。
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: 服务健康
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: 数据库不可用时返回降级状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT（HS256）访问令牌，通过 `Authorization: Bearer <token>` 传递。
+        载荷包含 sub（用户ID）、roleCode、tokenVersion、jti、iat、exp；
+        服务端每次请求校验签名、有效期、账号状态与 tokenVersion（REQ-UAM-08/09、NFR-07）。
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      description: 页码，从 1 开始
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSizeParam:
+      name: pageSize
+      in: query
+      description: 每页条数，1~100，默认 20
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    KeywordParam:
+      name: keyword
+      in: query
+      description: 关键词（模糊匹配名称/编号/题干）
+      schema:
+        type: string
+        maxLength: 64
+    UserIdPath:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    KnowledgePointIdPath:
+      name: kpId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    BankIdPath:
+      name: bankId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    QuestionIdPath:
+      name: questionId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    PaperIdPath:
+      name: paperId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    ExamIdPath:
+      name: examId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    AttemptIdPath:
+      name: attemptId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    TaskIdPath:
+      name: taskId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    AppealIdPath:
+      name: appealId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    NoticeIdPath:
+      name: noticeId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    ConfigKeyPath:
+      name: configKey
+      in: path
+      required: true
+      schema:
+        type: string
+        example: exam.defaultDuration
+
+  responses:
+    Ok:
+      description: 操作成功
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+    BadRequest:
+      description: 请求参数非法（格式或取值不合法）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 未认证或令牌失效（缺失、签名错误、已过期、已吊销、tokenVersion 不匹配）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: 已认证但无权限（功能权限或数据权限越权）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在或已软删除
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: 业务状态冲突（重复、锁定、引用保护、状态机不允许）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: 字段级校验失败，errors 数组给出字段与原因
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    # ---------------- 通用响应 ----------------
+    ApiResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 业务码，0 表示成功；非 0 见错误码表
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          description: 业务数据，可为对象或数组；失败时为 null
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 90301
+        message:
+          type: string
+          example: 无权访问该资源
+        errors:
+          type: array
+          description: 字段级错误明细（仅校验失败时返回）
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                example: stem
+              message:
+                type: string
+                example: 题干不能为空
+        data:
+          description: 部分 409 响应在此返回引用清单或缺口明细；无附加数据时为 null
+
+    PageMeta:
+      type: object
+      required: [list, total, page, pageSize]
+      properties:
+        list:
+          type: array
+          items:
+            type: object
+        total:
+          type: integer
+          description: 符合条件的总条数
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    # ---------------- 认证与账号 ----------------
+    RegisterRequest:
+      type: object
+      required: [username, realName, password, classId, email]
+      properties:
+        username:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{4,32}$'
+          description: 学号
+          example: S2024010
+        realName:
+          type: string
+          maxLength: 64
+          example: 张三
+        password:
+          type: string
+          minLength: 8
+          maxLength: 64
+          description: 长度≥8，须同时包含大小写字母与数字
+          example: Student@2026
+        classId:
+          type: integer
+          format: int64
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          maxLength: 32
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: S2024001
+        password:
+          type: string
+          example: Student@2026
+        captchaId:
+          type: string
+          description: 图形验证码标识（生产环境必填）
+        captchaCode:
+          type: string
+          description: 图形验证码内容（生产环境必填）
+
+    Tokens:
+      type: object
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          description: Access Token 剩余有效秒数
+          example: 7200
+        refreshExpiresIn:
+          type: integer
+          example: 604800
+
+    LoginResult:
+      allOf:
+        - $ref: '#/components/schemas/Tokens'
+        - type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/CurrentUser'
+            homeRoute:
+              type: string
+              description: 对应角色的工作台路由
+              example: /teacher/dashboard
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    CurrentUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        realName:
+          type: string
+        roleCode:
+          type: string
+          enum: [admin, teacher, student]
+        classId:
+          type: integer
+          format: int64
+          nullable: true
+        className:
+          type: string
+          nullable: true
+        permissions:
+          type: array
+          description: 权限点编码列表，前端仅用于菜单渲染，不构成安全边界
+          items:
+            type: string
+          example: [question.create, paper.random, exam.publish]
+
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        realName:
+          type: string
+          maxLength: 64
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          maxLength: 32
+
+    PasswordChangeRequest:
+      type: object
+      required: [oldPassword, newPassword, confirmPassword]
+      properties:
+        oldPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 64
+          description: 长度≥8，须同时包含大小写字母与数字
+        confirmPassword:
+          type: string
+
+    # ---------------- 用户与权限 ----------------
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        realName:
+          type: string
+        email:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        roleCode:
+          type: string
+          enum: [admin, teacher, student]
+        classId:
+          type: integer
+          format: int64
+          nullable: true
+        className:
+          type: string
+          nullable: true
+        department:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, active, disabled, locked]
+        registerChannel:
+          type: string
+          enum: [admin, self]
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/User'
+
+    UserCreateRequest:
+      type: object
+      required: [username, realName, roleCode]
+      properties:
+        username:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{4,32}$'
+        realName:
+          type: string
+          maxLength: 64
+        roleCode:
+          type: string
+          enum: [admin, teacher, student]
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        classId:
+          type: integer
+          format: int64
+          description: roleCode=student 时必填
+        department:
+          type: string
+          maxLength: 64
+        remark:
+          type: string
+          maxLength: 255
+
+    UserUpdateRequest:
+      type: object
+      properties:
+        realName:
+          type: string
+          maxLength: 64
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        classId:
+          type: integer
+          format: int64
+        department:
+          type: string
+        remark:
+          type: string
+          maxLength: 255
+
+    UserStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, disabled]
+        reason:
+          type: string
+          maxLength: 255
+          description: 禁用原因，写入审计日志
+
+    UserRoleRequest:
+      type: object
+      required: [roleCode]
+      properties:
+        roleCode:
+          type: string
+          enum: [admin, teacher, student]
+        permissionCodes:
+          type: array
+          description: 可选的权限点覆盖；为空表示按角色默认权限
+          items:
+            type: string
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        roleCode:
+          type: string
+        roleName:
+          type: string
+        description:
+          type: string
+          nullable: true
+        isBuiltin:
+          type: boolean
+
+    Permission:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        permCode:
+          type: string
+        permName:
+          type: string
+        module:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    ClassInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        classCode:
+          type: string
+        className:
+          type: string
+        gradeYear:
+          type: integer
+        department:
+          type: string
+          nullable: true
+        headTeacherId:
+          type: integer
+          format: int64
+          nullable: true
+        studentCount:
+          type: integer
+
+    ClassCreateRequest:
+      type: object
+      required: [classCode, className, gradeYear]
+      properties:
+        classCode:
+          type: string
+          maxLength: 32
+        className:
+          type: string
+          maxLength: 64
+        gradeYear:
+          type: integer
+        department:
+          type: string
+          maxLength: 64
+        headTeacherId:
+          type: integer
+          format: int64
+
+    # ---------------- 知识点 ----------------
+    KnowledgePoint:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        kpCode:
+          type: string
+        kpName:
+          type: string
+        parentId:
+          type: integer
+          format: int64
+          nullable: true
+        level:
+          type: integer
+          enum: [1, 2]
+        sortOrder:
+          type: integer
+        status:
+          type: string
+          enum: [active, archived]
+        questionCount:
+          type: integer
+
+    KnowledgePointNode:
+      allOf:
+        - $ref: '#/components/schemas/KnowledgePoint'
+        - type: object
+          properties:
+            children:
+              type: array
+              items:
+                $ref: '#/components/schemas/KnowledgePoint'
+
+    KnowledgePointRequest:
+      type: object
+      required: [kpName, level]
+      properties:
+        kpCode:
+          type: string
+          maxLength: 32
+          description: 留空时由服务端按父级自动生成
+        kpName:
+          type: string
+          maxLength: 64
+        parentId:
+          type: integer
+          format: int64
+          nullable: true
+        level:
+          type: integer
+          enum: [1, 2]
+        sortOrder:
+          type: integer
+          default: 0
+
+    # ---------------- 题库与题目 ----------------
+    QuestionBank:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        bankCode:
+          type: string
+        bankName:
+          type: string
+        ownerId:
+          type: integer
+          format: int64
+        ownerName:
+          type: string
+        description:
+          type: string
+          nullable: true
+        visibility:
+          type: string
+          enum: [private, shared]
+        questionCount:
+          type: integer
+        status:
+          type: string
+          enum: [active, archived, deleted]
+        createdAt:
+          type: string
+          format: date-time
+
+    QuestionBankPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuestionBank'
+
+    QuestionBankRequest:
+      type: object
+      required: [bankName]
+      properties:
+        bankCode:
+          type: string
+          maxLength: 32
+        bankName:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        visibility:
+          type: string
+          enum: [private, shared]
+          default: private
+
+    BankAuthorizationRequest:
+      type: object
+      required: [granteeId]
+      properties:
+        granteeId:
+          type: integer
+          format: int64
+        canWrite:
+          type: boolean
+          default: false
+
+    QuestionOption:
+      type: object
+      required: [key, content]
+      properties:
+        key:
+          type: string
+          example: A
+        content:
+          type: string
+          example: 哈希表 + 双向链表
+
+    ScoringPoint:
+      type: object
+      required: [point, score]
+      properties:
+        point:
+          type: string
+          example: 指出 Header、Payload、Signature 三部分
+        score:
+          type: number
+          format: float
+          example: 6
+
+    Question:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        questionNo:
+          type: string
+        bankId:
+          type: integer
+          format: int64
+        bankName:
+          type: string
+        knowledgePointId:
+          type: integer
+          format: int64
+          nullable: true
+        knowledgePointName:
+          type: string
+          nullable: true
+        questionType:
+          type: string
+          enum: [single, multiple, judge, fill, short]
+        difficulty:
+          type: integer
+          minimum: 1
+          maximum: 5
+        stem:
+          type: string
+        options:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        correctAnswer:
+          type: array
+          description: |
+            标准答案数组：单选 ["A"]；多选 ["A","C"]；判断 ["true"]/["false"]；
+            填空按空顺序 ["答案1","答案2"]；简答为 []（采分点见 scoringPoints）。
+          items:
+            type: string
+        scoringPoints:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/ScoringPoint'
+        analysis:
+          type: string
+          nullable: true
+        defaultScore:
+          type: number
+          format: float
+        currentVersion:
+          type: integer
+        referenceCount:
+          type: integer
+        status:
+          type: string
+          enum: [draft, published, archived]
+        createdBy:
+          type: integer
+          format: int64
+        createdByName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    QuestionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Question'
+
+    QuestionCreateRequest:
+      type: object
+      required: [bankId, questionType, stem, correctAnswer, defaultScore]
+      properties:
+        bankId:
+          type: integer
+          format: int64
+        knowledgePointId:
+          type: integer
+          format: int64
+        questionType:
+          type: string
+          enum: [single, multiple, judge, fill, short]
+        difficulty:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+        stem:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        correctAnswer:
+          type: array
+          items:
+            type: string
+        scoringPoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoringPoint'
+        analysis:
+          type: string
+        defaultScore:
+          type: number
+          format: float
+          minimum: 0.5
+        status:
+          type: string
+          enum: [draft, published]
+          default: published
+
+    QuestionUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/QuestionCreateRequest'
+        - type: object
+          properties:
+            version:
+              type: integer
+              description: 当前版本号（乐观锁），不一致返回 409
+
+    QuestionVersion:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        questionId:
+          type: integer
+          format: int64
+        versionNo:
+          type: integer
+        changeType:
+          type: string
+          enum: [create, update, rejudge]
+        changeSummary:
+          type: string
+          nullable: true
+        changedBy:
+          type: integer
+          format: int64
+        changedByName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        snapshot:
+          type: object
+          description: 该版本的完整内容快照
+
+    QuestionReferences:
+      type: object
+      properties:
+        questionId:
+          type: integer
+          format: int64
+        papers:
+          type: array
+          items:
+            type: object
+            properties:
+              paperId:
+                type: integer
+                format: int64
+              paperName:
+                type: string
+              status:
+                type: string
+        exams:
+          type: array
+          items:
+            type: object
+            properties:
+              examId:
+                type: integer
+                format: int64
+              examName:
+                type: string
+              status:
+                type: string
+
+    ImportResult:
+      type: object
+      properties:
+        totalRows:
+          type: integer
+        successCount:
+          type: integer
+        failureCount:
+          type: integer
+        failures:
+          type: array
+          items:
+            type: object
+            properties:
+              rowNo:
+                type: integer
+              reason:
+                type: string
+        importedQuestionIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    RejudgeRequest:
+      type: object
+      required: [correctAnswer]
+      properties:
+        correctAnswer:
+          type: array
+          description: 修正后的标准答案（数组结构同 Question.correctAnswer）
+          items:
+            type: string
+        reason:
+          type: string
+          maxLength: 500
+          description: 修正原因，必填并写入审计日志
+        scope:
+          type: string
+          enum: [all, exam]
+          default: all
+        examId:
+          type: integer
+          format: int64
+          description: scope=exam 时指定考试
+
+    RejudgeResult:
+      type: object
+      properties:
+        questionId:
+          type: integer
+          format: int64
+        affectedAttempts:
+          type: integer
+        scoreChangedAttempts:
+          type: integer
+        failedAttempts:
+          type: integer
+        changeLogIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        finishedAt:
+          type: string
+          format: date-time
+
+# ---------------- 试卷与组卷 ----------------
+    Paper:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        paperNo:
+          type: string
+        paperName:
+          type: string
+        ownerId:
+          type: integer
+          format: int64
+        ownerName:
+          type: string
+        assemblyMode:
+          type: string
+          enum: [manual, random]
+        totalScore:
+          type: number
+          format: float
+        questionCount:
+          type: integer
+        durationMinutes:
+          type: integer
+        usedCount:
+          type: integer
+        status:
+          type: string
+          enum: [draft, published, locked, archived, deleted]
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PaperPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Paper'
+
+    PaperQuestion:
+      type: object
+      description: 试卷题目（不含标准答案与解析）
+      properties:
+        paperQuestionId:
+          type: integer
+          format: int64
+        questionId:
+          type: integer
+          format: int64
+        questionNo:
+          type: string
+        questionType:
+          type: string
+          enum: [single, multiple, judge, fill, short]
+        difficulty:
+          type: integer
+        stem:
+          type: string
+        options:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        knowledgePointId:
+          type: integer
+          format: int64
+          nullable: true
+        sectionNo:
+          type: integer
+        orderNo:
+          type: integer
+        score:
+          type: number
+          format: float
+
+    PaperDetail:
+      allOf:
+        - $ref: '#/components/schemas/Paper'
+        - type: object
+          properties:
+            questions:
+              type: array
+              items:
+                $ref: '#/components/schemas/PaperQuestion'
+            scoreCheck:
+              type: object
+              properties:
+                expectedTotal:
+                  type: number
+                  format: float
+                actualSum:
+                  type: number
+                  format: float
+                matched:
+                  type: boolean
+                difference:
+                  type: number
+                  format: float
+
+    PaperCreateRequest:
+      type: object
+      required: [paperName, totalScore, durationMinutes, questions]
+      properties:
+        paperName:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        totalScore:
+          type: number
+          format: float
+          description: 设定总分，必须等于 questions 分值之和
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 180
+        questions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [questionId, score]
+            properties:
+              questionId:
+                type: integer
+                format: int64
+              score:
+                type: number
+                format: float
+              sectionNo:
+                type: integer
+                default: 1
+              orderNo:
+                type: integer
+                description: 缺省按数组顺序编号
+
+    PaperUpdateRequest:
+      type: object
+      properties:
+        paperName:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        totalScore:
+          type: number
+          format: float
+        durationMinutes:
+          type: integer
+
+    RandomPaperRequest:
+      type: object
+      required: [paperName, totalScore, durationMinutes, rules]
+      properties:
+        paperName:
+          type: string
+          maxLength: 128
+        totalScore:
+          type: number
+          format: float
+        durationMinutes:
+          type: integer
+        bankIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        knowledgePointIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        rules:
+          type: array
+          description: 各题型的抽题规则
+          items:
+            type: object
+            required: [questionType, count, scorePerQuestion]
+            properties:
+              questionType:
+                type: string
+                enum: [single, multiple, judge, fill, short]
+              count:
+                type: integer
+                minimum: 1
+              scorePerQuestion:
+                type: number
+                format: float
+              difficultyDistribution:
+                type: object
+                description: 难度占比（key 为 1~5），各项之和须为 1
+                additionalProperties:
+                  type: number
+                  format: float
+                example:
+                  '1': 0.2
+                  '2': 0.3
+                  '3': 0.3
+                  '4': 0.15
+                  '5': 0.05
+        saveDraft:
+          type: boolean
+          default: true
+
+    ShortageItem:
+      type: object
+      properties:
+        dimension:
+          type: string
+          description: 缺口维度：questionType/difficulty/knowledgePoint
+        questionType:
+          type: string
+          nullable: true
+        difficulty:
+          type: integer
+          nullable: true
+        knowledgePointId:
+          type: integer
+          format: int64
+          nullable: true
+        requiredCount:
+          type: integer
+        availableCount:
+          type: integer
+        shortageCount:
+          type: integer
+
+    RandomPaperResult:
+      type: object
+      properties:
+        paperId:
+          type: integer
+          format: int64
+        paperName:
+          type: string
+        totalScore:
+          type: number
+          format: float
+        questionCount:
+          type: integer
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaperQuestion'
+        shortages:
+          type: array
+          description: 成功生成时为空数组
+          items:
+            $ref: '#/components/schemas/ShortageItem'
+
+    PaperQuestionAddRequest:
+      type: object
+      required: [questions]
+      properties:
+        questions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [questionId, score]
+            properties:
+              questionId:
+                type: integer
+                format: int64
+              score:
+                type: number
+                format: float
+              sectionNo:
+                type: integer
+                default: 1
+              orderNo:
+                type: integer
+
+    PaperQuestionUpdateRequest:
+      type: object
+      required: [questions]
+      properties:
+        questions:
+          type: array
+          description: 全量覆盖顺序与分值
+          items:
+            type: object
+            required: [paperQuestionId, score, orderNo, sectionNo]
+            properties:
+              paperQuestionId:
+                type: integer
+                format: int64
+              score:
+                type: number
+                format: float
+              orderNo:
+                type: integer
+              sectionNo:
+                type: integer
+
+    PaperPreview:
+      type: object
+      properties:
+        paperId:
+          type: integer
+          format: int64
+        paperName:
+          type: string
+        totalScore:
+          type: number
+          format: float
+        durationMinutes:
+          type: integer
+        questions:
+          type: array
+          description: 考生视角题目，**不含** correctAnswer / analysis
+          items:
+            $ref: '#/components/schemas/PaperQuestion'
+
+    # ---------------- 考试管理 ----------------
+    Exam:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        examNo:
+          type: string
+        examName:
+          type: string
+        paperId:
+          type: integer
+          format: int64
+        paperName:
+          type: string
+        ownerId:
+          type: integer
+          format: int64
+        ownerName:
+          type: string
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+        passScore:
+          type: number
+          format: float
+        maxAttempts:
+          type: integer
+        shuffleQuestions:
+          type: boolean
+        antiCheatEnabled:
+          type: boolean
+        antiCheatThreshold:
+          type: integer
+        autoSubmitOnTimeout:
+          type: boolean
+        scoreStatus:
+          type: string
+          enum: [unpublished, published]
+        scorePublishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [draft, published, ongoing, finished, cancelled, archived]
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    ExamPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Exam'
+
+    ExamScope:
+      type: object
+      properties:
+        classIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        studentIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    ExamDetail:
+      allOf:
+        - $ref: '#/components/schemas/Exam'
+        - type: object
+          properties:
+            scope:
+              $ref: '#/components/schemas/ExamScope'
+            taskStats:
+              type: object
+              properties:
+                total:
+                  type: integer
+                pending:
+                  type: integer
+                doing:
+                  type: integer
+                submitted:
+                  type: integer
+                missed:
+                  type: integer
+
+    ExamCreateRequest:
+      type: object
+      required: [examName, paperId, startTime, endTime, durationMinutes, scope]
+      properties:
+        examName:
+          type: string
+          maxLength: 128
+        paperId:
+          type: integer
+          format: int64
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 180
+          description: 不得超过考试窗口长度
+        passScore:
+          type: number
+          format: float
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 1
+        shuffleQuestions:
+          type: boolean
+          default: false
+        antiCheatEnabled:
+          type: boolean
+          default: true
+        antiCheatThreshold:
+          type: integer
+          default: 3
+        autoSubmitOnTimeout:
+          type: boolean
+          default: true
+        description:
+          type: string
+          maxLength: 500
+        scope:
+          $ref: '#/components/schemas/ExamScope'
+
+    ExamUpdateRequest:
+      type: object
+      properties:
+        examName:
+          type: string
+          maxLength: 128
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+        passScore:
+          type: number
+          format: float
+        antiCheatEnabled:
+          type: boolean
+        antiCheatThreshold:
+          type: integer
+        description:
+          type: string
+          maxLength: 500
+        scope:
+          $ref: '#/components/schemas/ExamScope'
+
+    StudentExamItem:
+      allOf:
+        - $ref: '#/components/schemas/Exam'
+        - type: object
+          properties:
+            attemptsAllowed:
+              type: integer
+            attemptsUsed:
+              type: integer
+            remainingAttempts:
+              type: integer
+            canStart:
+              type: boolean
+            rejectReason:
+              type: string
+              nullable: true
+            ongoingAttemptId:
+              type: integer
+              format: int64
+              nullable: true
+            latestAttemptId:
+              type: integer
+              format: int64
+              nullable: true
+            latestGradeStatus:
+              type: string
+              nullable: true
+
+    StudentExamPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/StudentExamItem'
+
+    ExamPublishResult:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        status:
+          type: string
+          example: published
+        taskCount:
+          type: integer
+        notifiedCount:
+          type: integer
+        publishedAt:
+          type: string
+          format: date-time
+
+    ExamStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [cancelled, archived, finished]
+        endTime:
+          type: string
+          format: date-time
+          description: status=cancelled/延期时的新结束时间
+        reason:
+          type: string
+          maxLength: 255
+        notifyStudents:
+          type: boolean
+          default: true
+
+    ExamTask:
+      type: object
+      properties:
+        taskId:
+          type: integer
+          format: int64
+        examId:
+          type: integer
+          format: int64
+        studentId:
+          type: integer
+          format: int64
+        studentNo:
+          type: string
+        studentName:
+          type: string
+        className:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, doing, submitted, missed]
+        attemptsAllowed:
+          type: integer
+        attemptsUsed:
+          type: integer
+        notifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ExamTaskPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/ExamTask'
+
+    ExamGrantRequest:
+      type: object
+      required: [studentIds, extraAttempts, reason]
+      properties:
+        studentIds:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            format: int64
+        extraAttempts:
+          type: integer
+          minimum: 1
+          maximum: 3
+        reason:
+          type: string
+          maxLength: 255
+
+    MonitorAttempt:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        studentId:
+          type: integer
+          format: int64
+        studentNo:
+          type: string
+        studentName:
+          type: string
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+        isAbnormal:
+          type: boolean
+        abnormalReason:
+          type: string
+          nullable: true
+        answeredCount:
+          type: integer
+        questionCount:
+          type: integer
+
+    ExamMonitor:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        totalStudents:
+          type: integer
+        doingCount:
+          type: integer
+        submittedCount:
+          type: integer
+        missedCount:
+          type: integer
+        abnormalCount:
+          type: integer
+        onlineRate:
+          type: number
+          format: float
+        serverTime:
+          type: string
+          format: date-time
+        abnormalAttempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MonitorAttempt'
+
+    AntiCheatEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        attemptId:
+          type: integer
+          format: int64
+        studentId:
+          type: integer
+          format: int64
+        studentName:
+          type: string
+        eventType:
+          type: string
+          enum: [switch_screen, exit_fullscreen, copy_paste, multi_device, blur]
+        cumulativeCount:
+          type: integer
+        eventTime:
+          type: string
+          format: date-time
+        detail:
+          type: object
+          nullable: true
+        ip:
+          type: string
+          nullable: true
+
+    AntiCheatEventPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/AntiCheatEvent'
+
+    # ---------------- 在线答题 ----------------
+    AttemptQuestion:
+      type: object
+      description: 下发给考生的题目（已脱敏，不含答案与解析）
+      properties:
+        attemptQuestionId:
+          type: integer
+          format: int64
+        questionId:
+          type: integer
+          format: int64
+        orderNo:
+          type: integer
+        questionType:
+          type: string
+          enum: [single, multiple, judge, fill, short]
+        stem:
+          type: string
+        options:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        fullScore:
+          type: number
+          format: float
+        studentAnswer:
+          type: array
+          nullable: true
+          description: 已暂存答案；未作答为 null
+          items:
+            type: string
+        answerSavedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AnswerItem:
+      type: object
+      required: [questionId]
+      properties:
+        questionId:
+          type: integer
+          format: int64
+        answer:
+          type: array
+          description: 选择/判断为答案键数组，填空为按空顺序的答案数组，简答为单元素文本数组
+          items:
+            type: string
+        answerVersion:
+          type: integer
+          description: 客户端持有的答案版本（乐观锁），与服务端不一致返回 409
+
+    AttemptSession:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        attemptNo:
+          type: string
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        studentId:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [ongoing, submitted, grading, graded, reviewed, expired]
+        startedAt:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+        remainingSeconds:
+          type: integer
+          description: 由服务端时间计算，客户端仅用于展示
+        serverTime:
+          type: string
+          format: date-time
+        autoSubmitOnTimeout:
+          type: boolean
+        totalScore:
+          type: number
+          format: float
+        gradingStatus:
+          type: string
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttemptQuestion'
+
+    RemainingTime:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        remainingSeconds:
+          type: integer
+        serverTime:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+        shouldAutoSubmit:
+          type: boolean
+          description: 剩余时间≤0 且 autoSubmitOnTimeout=true 时为 true
+
+    AnswerSaveRequest:
+      type: object
+      required: [answers]
+      properties:
+        answers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AnswerItem'
+
+    AntiCheatEventRequest:
+      type: object
+      required: [eventType]
+      properties:
+        eventType:
+          type: string
+          enum: [switch_screen, exit_fullscreen, copy_paste, multi_device, blur]
+        detail:
+          type: object
+          nullable: true
+          description: 事件详情，如可见性变化、粘贴长度、设备指纹
+        clientTime:
+          type: string
+          format: date-time
+          description: 客户端时间，仅用于展示；服务端以接收时间为准
+
+    SubmitResult:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        attemptNo:
+          type: string
+        status:
+          type: string
+          enum: [submitted, grading, graded]
+        submittedAt:
+          type: string
+          format: date-time
+        submitType:
+          type: string
+          enum: [manual, timeout, force]
+        objectiveScore:
+          type: number
+          format: float
+        subjectiveScore:
+          type: number
+          format: float
+        totalScore:
+          type: number
+          format: float
+        passScore:
+          type: number
+          format: float
+        isPassed:
+          type: boolean
+          nullable: true
+        gradingStatus:
+          type: string
+          enum: [pending, auto_done, manual_pending, done]
+        gradingTaskId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 需要人工阅卷时返回的首个阅卷任务ID
+        pendingManualCount:
+          type: integer
+        replayed:
+          type: boolean
+          description: true 表示本次为幂等重放，结果与首次一致
+
+    GradeResult:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        attemptQuestionId:
+          type: integer
+          format: int64
+          nullable: true
+        autoScore:
+          type: number
+          format: float
+        manualScore:
+          type: number
+          format: float
+          nullable: true
+        finalScore:
+          type: number
+          format: float
+        objectiveScore:
+          type: number
+          format: float
+        subjectiveScore:
+          type: number
+          format: float
+        totalScore:
+          type: number
+          format: float
+        isPassed:
+          type: boolean
+          nullable: true
+        gradingStatus:
+          type: string
+        gradedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---------------- 阅卷与复核 ----------------
+    GradingTask:
+      type: object
+      properties:
+        taskId:
+          type: integer
+          format: int64
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        attemptId:
+          type: integer
+          format: int64
+        attemptQuestionId:
+          type: integer
+          format: int64
+        questionId:
+          type: integer
+          format: int64
+        questionType:
+          type: string
+        studentId:
+          type: integer
+          format: int64
+        studentNo:
+          type: string
+        studentName:
+          type: string
+        fullScore:
+          type: number
+          format: float
+        status:
+          type: string
+          enum: [pending, first_done, second_pending, arbitration, done]
+        assigneeId:
+          type: integer
+          format: int64
+          nullable: true
+        firstScore:
+          type: number
+          format: float
+          nullable: true
+        secondScore:
+          type: number
+          format: float
+          nullable: true
+        finalScore:
+          type: number
+          format: float
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    GradingTaskPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/GradingTask'
+            pendingCount:
+              type: integer
+
+    GradingTaskDetail:
+      allOf:
+        - $ref: '#/components/schemas/GradingTask'
+        - type: object
+          properties:
+            stem:
+              type: string
+            options:
+              type: array
+              nullable: true
+              items:
+                $ref: '#/components/schemas/QuestionOption'
+            correctAnswer:
+              type: array
+              description: 参考答案（仅阅卷教师可见）
+              items:
+                type: string
+            scoringPoints:
+              type: array
+              nullable: true
+              items:
+                $ref: '#/components/schemas/ScoringPoint'
+            analysis:
+              type: string
+              nullable: true
+            studentAnswer:
+              type: array
+              nullable: true
+              items:
+                type: string
+            firstComment:
+              type: string
+              nullable: true
+            secondComment:
+              type: string
+              nullable: true
+            arbitrationScore:
+              type: number
+              format: float
+              nullable: true
+            arbitrationReason:
+              type: string
+              nullable: true
+
+    ScoreSubmitRequest:
+      type: object
+      required: [score]
+      properties:
+        score:
+          type: number
+          format: float
+          minimum: 0
+          description: 得分区间 0~该题满分
+        comment:
+          type: string
+          maxLength: 500
+        scoringPointScores:
+          type: array
+          description: 按采分点给分明细
+          items:
+            type: object
+            properties:
+              point:
+                type: string
+              score:
+                type: number
+                format: float
+
+    ArbitrateRequest:
+      type: object
+      required: [score, reason]
+      properties:
+        score:
+          type: number
+          format: float
+          minimum: 0
+        reason:
+          type: string
+          maxLength: 500
+          description: 仲裁理由，必填并留痕
+
+    GraderWorkload:
+      type: object
+      properties:
+        graderId:
+          type: integer
+          format: int64
+        graderName:
+          type: string
+        assignedCount:
+          type: integer
+        gradedCount:
+          type: integer
+        pendingCount:
+          type: integer
+
+    GradingProgress:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        totalAttempts:
+          type: integer
+        gradedAttempts:
+          type: integer
+        pendingAttempts:
+          type: integer
+        completionRate:
+          type: number
+          format: float
+        totalSubjectiveTasks:
+          type: integer
+        doneTasks:
+          type: integer
+        pendingTasks:
+          type: integer
+        arbitrationTasks:
+          type: integer
+        graders:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraderWorkload'
+
+    # ---------------- 成绩与统计 ----------------
+    GradeSummary:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+        scoreStatus:
+          type: string
+          enum: [unpublished, published]
+        totalScore:
+          type: number
+          format: float
+          nullable: true
+          description: 未发布成绩时为 null，前端展示"评阅中"
+        objectiveScore:
+          type: number
+          format: float
+          nullable: true
+        subjectiveScore:
+          type: number
+          format: float
+          nullable: true
+        isPassed:
+          type: boolean
+          nullable: true
+        classRank:
+          type: integer
+          nullable: true
+        gradingStatus:
+          type: string
+
+    GradePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/GradeSummary'
+
+    GradeDetailQuestion:
+      type: object
+      properties:
+        questionId:
+          type: integer
+          format: int64
+        orderNo:
+          type: integer
+        questionType:
+          type: string
+        stem:
+          type: string
+        options:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        fullScore:
+          type: number
+          format: float
+        studentAnswer:
+          type: array
+          nullable: true
+          items:
+            type: string
+        correctAnswer:
+          type: array
+          nullable: true
+          items:
+            type: string
+        analysis:
+          type: string
+          nullable: true
+        autoScore:
+          type: number
+          format: float
+        manualScore:
+          type: number
+          format: float
+          nullable: true
+        finalScore:
+          type: number
+          format: float
+        isCorrect:
+          type: boolean
+          nullable: true
+        graderComment:
+          type: string
+          nullable: true
+
+    GradeDetail:
+      allOf:
+        - $ref: '#/components/schemas/GradeSummary'
+        - type: object
+          properties:
+            studentName:
+              type: string
+            passScore:
+              type: number
+              format: float
+            rankRange:
+              type: string
+              nullable: true
+              example: 前 20%
+            questions:
+              type: array
+              items:
+                $ref: '#/components/schemas/GradeDetailQuestion'
+
+    ExamScoreItem:
+      type: object
+      properties:
+        attemptId:
+          type: integer
+          format: int64
+        studentId:
+          type: integer
+          format: int64
+        studentNo:
+          type: string
+        studentName:
+          type: string
+        className:
+          type: string
+          nullable: true
+        totalScore:
+          type: number
+          format: float
+          nullable: true
+        objectiveScore:
+          type: number
+          format: float
+          nullable: true
+        subjectiveScore:
+          type: number
+          format: float
+          nullable: true
+        isPassed:
+          type: boolean
+          nullable: true
+        gradingStatus:
+          type: string
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+        classRank:
+          type: integer
+          nullable: true
+
+    ExamScorePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/ExamScoreItem'
+
+    ScoreDistributionItem:
+      type: object
+      properties:
+        range:
+          type: string
+          example: 90-100
+        count:
+          type: integer
+        ratio:
+          type: number
+          format: float
+
+    ExamStatistics:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        participantCount:
+          type: integer
+          description: 应考人数
+        submittedCount:
+          type: integer
+        absentCount:
+          type: integer
+        submitRate:
+          type: number
+          format: float
+        avgScore:
+          type: number
+          format: float
+        maxScore:
+          type: number
+          format: float
+        minScore:
+          type: number
+          format: float
+        stdDev:
+          type: number
+          format: float
+        passCount:
+          type: integer
+        passRate:
+          type: number
+          format: float
+        excellentCount:
+          type: integer
+        excellentRate:
+          type: number
+          format: float
+        scoreDistribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoreDistributionItem'
+        calculatedAt:
+          type: string
+          format: date-time
+
+    QuestionAnalysis:
+      type: object
+      properties:
+        questionId:
+          type: integer
+          format: int64
+        questionNo:
+          type: string
+        questionType:
+          type: string
+        stem:
+          type: string
+        fullScore:
+          type: number
+          format: float
+        answerCount:
+          type: integer
+        correctRate:
+          type: number
+          format: float
+        avgScoreRate:
+          type: number
+          format: float
+        difficultyIndex:
+          type: number
+          format: float
+        highGroupRate:
+          type: number
+          format: float
+        lowGroupRate:
+          type: number
+          format: float
+        discriminationIndex:
+          type: number
+          format: float
+        isAbnormal:
+          type: boolean
+        abnormalReason:
+          type: string
+          nullable: true
+
+    QuestionAnalysisResult:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        calculatedAt:
+          type: string
+          format: date-time
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuestionAnalysis'
+
+    TrendSeries:
+      type: object
+      properties:
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        examDate:
+          type: string
+          format: date
+        classId:
+          type: integer
+          format: int64
+          nullable: true
+        className:
+          type: string
+          nullable: true
+        avgScore:
+          type: number
+          format: float
+        passRate:
+          type: number
+          format: float
+        excellentRate:
+          type: number
+          format: float
+
+    TrendResult:
+      type: object
+      properties:
+        series:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrendSeries'
+        knowledgePointLoss:
+          type: array
+          items:
+            $ref: '#/components/schemas/KnowledgePointStat'
+
+    KnowledgePointStat:
+      type: object
+      properties:
+        knowledgePointId:
+          type: integer
+          format: int64
+        knowledgePointName:
+          type: string
+        parentId:
+          type: integer
+          format: int64
+          nullable: true
+        studentCount:
+          type: integer
+        totalScore:
+          type: number
+          format: float
+        lostScore:
+          type: number
+          format: float
+        lostRate:
+          type: number
+          format: float
+
+    Appeal:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        appealNo:
+          type: string
+        examId:
+          type: integer
+          format: int64
+        examName:
+          type: string
+        attemptId:
+          type: integer
+          format: int64
+        studentId:
+          type: integer
+          format: int64
+        studentName:
+          type: string
+        questionId:
+          type: integer
+          format: int64
+          nullable: true
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [pending, accepted, rejected, closed]
+        handlerId:
+          type: integer
+          format: int64
+          nullable: true
+        handlerName:
+          type: string
+          nullable: true
+        handleComment:
+          type: string
+          nullable: true
+        oldScore:
+          type: number
+          format: float
+          nullable: true
+        newScore:
+          type: number
+          format: float
+          nullable: true
+        deadlineAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        handledAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AppealPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Appeal'
+
+    AppealCreateRequest:
+      type: object
+      required: [examId, reason]
+      properties:
+        examId:
+          type: integer
+          format: int64
+        questionId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 为空表示整卷申诉
+        reason:
+          type: string
+          maxLength: 1000
+
+    AppealHandleRequest:
+      type: object
+      required: [status, comment]
+      properties:
+        status:
+          type: string
+          enum: [accepted, rejected, closed]
+        comment:
+          type: string
+          maxLength: 500
+        newScore:
+          type: number
+          format: float
+          nullable: true
+          description: 采纳申诉时的修正后总分，须同时写入成绩变更记录
+
+    # ---------------- 系统管理 ----------------
+    ConfigItem:
+      type: object
+      properties:
+        configKey:
+          type: string
+        configValue:
+          type: string
+        valueType:
+          type: string
+          enum: [number, string, boolean, json]
+        configGroup:
+          type: string
+        description:
+          type: string
+          nullable: true
+        isEditable:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+
+    ConfigUpdateRequest:
+      type: object
+      required: [configValue]
+      properties:
+        configValue:
+          type: string
+        reason:
+          type: string
+          maxLength: 255
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        userId:
+          type: integer
+          format: int64
+          nullable: true
+        username:
+          type: string
+          nullable: true
+        roleCode:
+          type: string
+          nullable: true
+        module:
+          type: string
+        action:
+          type: string
+        httpMethod:
+          type: string
+          nullable: true
+        path:
+          type: string
+          nullable: true
+        ip:
+          type: string
+          nullable: true
+        userAgent:
+          type: string
+          nullable: true
+        requestSummary:
+          type: string
+          nullable: true
+        result:
+          type: string
+          enum: [success, failure]
+        errorCode:
+          type: string
+          nullable: true
+        durationMs:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    AuditLogPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/AuditLog'
+
+    Notice:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        content:
+          type: string
+        targetRole:
+          type: string
+          enum: [all, admin, teacher, student]
+        status:
+          type: string
+          enum: [draft, published, offline]
+        publishAt:
+          type: string
+          format: date-time
+          nullable: true
+        expireAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdBy:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+
+    NoticePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Notice'
+
+    NoticeRequest:
+      type: object
+      required: [title, content, targetRole]
+      properties:
+        title:
+          type: string
+          maxLength: 128
+        content:
+          type: string
+        targetRole:
+          type: string
+          enum: [all, admin, teacher, student]
+        publishAt:
+          type: string
+          format: date-time
+        expireAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [draft, published, offline]
+          default: published
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        content:
+          type: string
+          nullable: true
+        noticeType:
+          type: string
+          enum: [exam_publish, exam_change, score_publish, appeal, notice, system]
+        bizType:
+          type: string
+          nullable: true
+        bizId:
+          type: integer
+          format: int64
+          nullable: true
+        isRead:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    NotificationPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/Notification'
+            unreadCount:
+              type: integer
+
+    BackupRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        fileName:
+          type: string
+        filePath:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+          nullable: true
+        triggerType:
+          type: string
+          enum: [auto, manual]
+        status:
+          type: string
+          enum: [running, success, failed]
+        tableCount:
+          type: integer
+        rowCount:
+          type: integer
+          format: int64
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+
+    BackupPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            list:
+              type: array
+              items:
+                $ref: '#/components/schemas/BackupRecord'
+            retentionCount:
+              type: integer
+              description: 当前保留的备份份数（上限 7）
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [up, degraded]
+        database:
+          type: string
+          enum: [connected, disconnected]
+        version:
+          type: string
+          example: 1.0.0
+        serverTime:
+          type: string
+          format: date-time
+        uptimeSeconds:
+          type: integer
+        environment:
+          type: string
+          example: production

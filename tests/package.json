@@ -1,0 +1,19 @@
+{
+  "name": "oes-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "在线考试系统（OES）测试工程：Jest 单元测试 + Supertest 集成测试 + 契约一致性测试",
+  "scripts": {
+    "test": "jest",
+    "coverage": "jest --coverage",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration",
+    "test:contract": "jest tests/contract"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "js-yaml": "^4.1.0",
+    "mysql2": "^3.11.0",
+    "supertest": "^7.0.0"
+  }
+}

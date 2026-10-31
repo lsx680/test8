@@ -1,0 +1,641 @@
+@startuml OES-ER-Diagram
+' =====================================================================
+'  在线考试系统（OES）实体关系图（ER Diagram）
+'  版本：V1.0  作者：陈工（系统架构师）  日期：2026-10-31
+'  对应设计文档：docs/design/系统设计文档.md §4
+'  对应建表脚本：docs/design/schema.sql（31 张表，一一对应）
+'  图例：* = NOT NULL  <<PK>> 主键  <<UK>> 唯一键  <<FK>> 外键
+' =====================================================================
+
+title 在线考试系统（OES）实体关系图（31 张表）
+
+skinparam backgroundColor #0B1020
+skinparam defaultFontColor #E2E8F0
+skinparam entityBackgroundColor #10182B
+skinparam entityBorderColor #22D3EE
+skinparam entityFontColor #E2E8F0
+skinparam ArrowColor #22D3EE
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 26
+skinparam ranksep 46
+
+' ============================================================
+' 一、系统管理域（8 张）
+' ============================================================
+entity "sys_class\n班级" as sys_class {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * class_code : VARCHAR(32) <<UK>>
+  * class_name : VARCHAR(64)
+  * grade_year : SMALLINT
+  department : VARCHAR(64)
+  head_teacher_id : BIGINT UNSIGNED <<FK逻辑>>
+  * status : TINYINT
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "sys_user\n用户账号" as sys_user {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * username : VARCHAR(32) <<UK>>
+  * password_hash : VARCHAR(72)
+  * real_name : VARCHAR(64)
+  email : VARCHAR(128) <<UK>>
+  phone : VARCHAR(32)
+  * role_code : VARCHAR(16)
+  class_id : BIGINT UNSIGNED <<FK>>
+  department : VARCHAR(64)
+  * status : VARCHAR(16)
+  * register_channel : VARCHAR(16)
+  * failed_attempts : TINYINT
+  locked_until : DATETIME(3)
+  * token_version : INT
+  password_changed_at : DATETIME(3)
+  last_login_at : DATETIME(3)
+  last_login_ip : VARCHAR(45)
+  remark : VARCHAR(255)
+  created_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "sys_role\n角色" as sys_role {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * role_code : VARCHAR(16) <<UK>>
+  * role_name : VARCHAR(32)
+  description : VARCHAR(255)
+  * is_builtin : TINYINT
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+entity "sys_permission\n权限点" as sys_permission {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * perm_code : VARCHAR(64) <<UK>>
+  * perm_name : VARCHAR(64)
+  * module : VARCHAR(32)
+  http_method : VARCHAR(16)
+  path_pattern : VARCHAR(255)
+  description : VARCHAR(255)
+  * created_at : DATETIME(3)
+}
+
+entity "sys_role_permission\n角色权限映射" as sys_role_permission {
+  * role_id : BIGINT UNSIGNED <<PK,FK>>
+  * permission_id : BIGINT UNSIGNED <<PK,FK>>
+  --
+  * created_at : DATETIME(3)
+}
+
+entity "sys_refresh_token\n刷新令牌白名单" as sys_refresh_token {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * user_id : BIGINT UNSIGNED <<FK>>
+  * jti : CHAR(36) <<UK>>
+  * token_hash : CHAR(64) <<UK>>
+  * issued_at : DATETIME(3)
+  * expires_at : DATETIME(3)
+  revoked_at : DATETIME(3)
+  revoke_reason : VARCHAR(64)
+  ip : VARCHAR(45)
+  user_agent : VARCHAR(255)
+}
+
+entity "sys_config\n系统参数" as sys_config {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * config_key : VARCHAR(64) <<UK>>
+  * config_value : TEXT
+  * value_type : VARCHAR(16)
+  * config_group : VARCHAR(32)
+  description : VARCHAR(255)
+  * is_editable : TINYINT
+  updated_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+entity "sys_audit_log\n审计日志" as sys_audit_log {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  user_id : BIGINT UNSIGNED <<FK逻辑>>
+  username : VARCHAR(32)
+  role_code : VARCHAR(16)
+  * module : VARCHAR(32)
+  * action : VARCHAR(64)
+  http_method : VARCHAR(16)
+  path : VARCHAR(255)
+  ip : VARCHAR(45)
+  user_agent : VARCHAR(255)
+  request_summary : TEXT
+  * result : VARCHAR(16)
+  error_code : VARCHAR(32)
+  duration_ms : INT
+  * created_at : DATETIME(3)
+}
+
+entity "sys_notice\n系统公告" as sys_notice {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * title : VARCHAR(128)
+  * content : TEXT
+  * target_role : VARCHAR(16)
+  * status : VARCHAR(16)
+  publish_at : DATETIME(3)
+  expire_at : DATETIME(3)
+  created_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "sys_notification\n站内通知" as sys_notification {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * user_id : BIGINT UNSIGNED <<FK>>
+  * title : VARCHAR(128)
+  content : VARCHAR(1000)
+  * notice_type : VARCHAR(32)
+  biz_type : VARCHAR(32)
+  biz_id : BIGINT UNSIGNED
+  * is_read : TINYINT
+  read_at : DATETIME(3)
+  * created_at : DATETIME(3)
+}
+
+entity "sys_backup_record\n备份记录" as sys_backup_record {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * file_name : VARCHAR(255)
+  * file_path : VARCHAR(500)
+  file_size : BIGINT UNSIGNED
+  * trigger_type : VARCHAR(16)
+  * status : VARCHAR(16)
+  table_count : INT
+  row_count : BIGINT UNSIGNED
+  * started_at : DATETIME(3)
+  finished_at : DATETIME(3)
+  operator_id : BIGINT UNSIGNED <<FK逻辑>>
+  remark : VARCHAR(500)
+}
+
+' ============================================================
+' 二、知识库与题库域（5 张）
+' ============================================================
+entity "kb_knowledge_point\n知识点（两级）" as kb_knowledge_point {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * kp_code : VARCHAR(32) <<UK>>
+  * kp_name : VARCHAR(64)
+  parent_id : BIGINT UNSIGNED <<FK>>
+  * level : TINYINT
+  * sort_order : INT
+  * status : VARCHAR(16)
+  * question_count : INT
+  created_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "qb_question_bank\n题库" as qb_question_bank {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * bank_code : VARCHAR(32) <<UK>>
+  * bank_name : VARCHAR(128)
+  * owner_id : BIGINT UNSIGNED <<FK>>
+  description : VARCHAR(500)
+  * visibility : VARCHAR(16)
+  * question_count : INT
+  * status : VARCHAR(16)
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "qb_bank_authorization\n题库授权" as qb_bank_authorization {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * bank_id : BIGINT UNSIGNED <<FK>>
+  * grantee_id : BIGINT UNSIGNED <<FK>>
+  * can_write : TINYINT
+  * granted_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+}
+
+entity "qb_question\n题目" as qb_question {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * question_no : VARCHAR(24) <<UK>>
+  * bank_id : BIGINT UNSIGNED <<FK>>
+  knowledge_point_id : BIGINT UNSIGNED <<FK>>
+  * question_type : VARCHAR(16)
+  * difficulty : TINYINT
+  * stem : TEXT
+  options : JSON
+  * correct_answer : JSON
+  scoring_points : JSON
+  analysis : TEXT
+  * default_score : DECIMAL(5,2)
+  * current_version : INT
+  * reference_count : INT
+  * status : VARCHAR(16)
+  * created_by : BIGINT UNSIGNED <<FK>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "qb_question_version\n题目版本快照" as qb_question_version {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * question_id : BIGINT UNSIGNED <<FK>>
+  * version_no : INT <<UK(question_id,no)>>
+  * snapshot : JSON
+  * change_type : VARCHAR(16)
+  change_summary : VARCHAR(255)
+  * changed_by : BIGINT UNSIGNED <<FK>>
+  * created_at : DATETIME(3)
+}
+
+' ============================================================
+' 三、试卷域（2 张）
+' ============================================================
+entity "pp_paper\n试卷" as pp_paper {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * paper_no : VARCHAR(32) <<UK>>
+  * paper_name : VARCHAR(128)
+  * owner_id : BIGINT UNSIGNED <<FK>>
+  * assembly_mode : VARCHAR(16)
+  * total_score : DECIMAL(7,2)
+  * question_count : INT
+  * duration_minutes : INT
+  * used_count : INT
+  * status : VARCHAR(16)
+  description : VARCHAR(500)
+  * created_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "pp_paper_question\n试卷题目明细" as pp_paper_question {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * paper_id : BIGINT UNSIGNED <<FK>>
+  * question_id : BIGINT UNSIGNED <<FK>>
+  * section_no : INT
+  * order_no : INT <<UK(paper_id,order)>>
+  * score : DECIMAL(5,2)
+  * question_snapshot : JSON
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+' ============================================================
+' 四、考试与答题域（7 张）
+' ============================================================
+entity "ex_exam\n考试" as ex_exam {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_no : VARCHAR(32) <<UK>>
+  * exam_name : VARCHAR(128)
+  * paper_id : BIGINT UNSIGNED <<FK>>
+  * owner_id : BIGINT UNSIGNED <<FK>>
+  * start_time : DATETIME(3)
+  * end_time : DATETIME(3)
+  * duration_minutes : INT
+  * pass_score : DECIMAL(7,2)
+  * max_attempts : TINYINT
+  * shuffle_questions : TINYINT
+  * anti_cheat_enabled : TINYINT
+  * anti_cheat_threshold : TINYINT
+  * auto_submit_on_timeout : TINYINT
+  * score_status : VARCHAR(16)
+  score_published_at : DATETIME(3)
+  published_by : BIGINT UNSIGNED <<FK逻辑>>
+  * status : VARCHAR(16)
+  description : VARCHAR(500)
+  * created_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  deleted_at : DATETIME(3)
+}
+
+entity "ex_exam_scope\n考试参考范围" as ex_exam_scope {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * scope_type : VARCHAR(16)
+  class_id : BIGINT UNSIGNED <<FK>>
+  student_id : BIGINT UNSIGNED <<FK>>
+  * created_at : DATETIME(3)
+}
+
+entity "ex_exam_task\n考试任务" as ex_exam_task {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * student_id : BIGINT UNSIGNED <<FK>>
+  * status : VARCHAR(16)
+  * attempts_allowed : TINYINT
+  * attempts_used : TINYINT
+  notified_at : DATETIME(3)
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+entity "ex_exam_attempt\n答卷（Attempt）" as ex_exam_attempt {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * attempt_no : CHAR(36) <<UK>>
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  task_id : BIGINT UNSIGNED <<FK>>
+  * student_id : BIGINT UNSIGNED <<FK>>
+  * paper_id : BIGINT UNSIGNED <<FK>>
+  * attempt_seq : TINYINT
+  * status : VARCHAR(16)
+  * started_at : DATETIME(3)
+  * deadline_at : DATETIME(3)
+  submitted_at : DATETIME(3)
+  submit_type : VARCHAR(16)
+  * objective_score : DECIMAL(7,2)
+  * subjective_score : DECIMAL(7,2)
+  * total_score : DECIMAL(7,2)
+  is_passed : TINYINT
+  * grading_status : VARCHAR(16)
+  * is_abnormal : TINYINT
+  abnormal_reason : VARCHAR(255)
+  device_key : VARCHAR(64)
+  ip : VARCHAR(45)
+  graded_at : DATETIME(3)
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+  active_flag : TINYINT <<生成列UK>>
+}
+
+entity "ex_exam_attempt_grant\n补考授权" as ex_exam_attempt_grant {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * student_id : BIGINT UNSIGNED <<FK>>
+  * extra_attempts : TINYINT
+  reason : VARCHAR(255)
+  * granted_by : BIGINT UNSIGNED <<FK逻辑>>
+  * created_at : DATETIME(3)
+}
+
+entity "ex_attempt_question\n答卷题目明细" as ex_attempt_question {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * attempt_id : BIGINT UNSIGNED <<FK>>
+  * paper_question_id : BIGINT UNSIGNED <<FK>>
+  * question_id : BIGINT UNSIGNED <<FK>>
+  * question_type : VARCHAR(16)
+  * order_no : INT <<UK(attempt_id,order)>>
+  * full_score : DECIMAL(5,2)
+  * question_snapshot : JSON
+  student_answer : TEXT
+  * answer_version : INT
+  answer_saved_at : DATETIME(3)
+  * auto_score : DECIMAL(5,2)
+  manual_score : DECIMAL(5,2)
+  * final_score : DECIMAL(5,2)
+  is_correct : TINYINT
+  * grade_status : VARCHAR(16)
+  grader_id : BIGINT UNSIGNED <<FK逻辑>>
+  graded_at : DATETIME(3)
+  grader_comment : VARCHAR(500)
+}
+
+entity "ex_anti_cheat_event\n防作弊事件" as ex_anti_cheat_event {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * attempt_id : BIGINT UNSIGNED <<FK>>
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * student_id : BIGINT UNSIGNED <<FK>>
+  * event_type : VARCHAR(32)
+  * cumulative_count : INT
+  * event_time : DATETIME(3)
+  detail : JSON
+  ip : VARCHAR(45)
+  user_agent : VARCHAR(255)
+  * created_at : DATETIME(3)
+}
+
+' ============================================================
+' 五、阅卷与复核域（3 张）
+' ============================================================
+entity "mk_grading_task\n人工阅卷任务" as mk_grading_task {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * attempt_id : BIGINT UNSIGNED <<FK>>
+  * attempt_question_id : BIGINT UNSIGNED <<FK,UK>>
+  * question_id : BIGINT UNSIGNED <<FK逻辑>>
+  * question_type : VARCHAR(16)
+  assignee_id : BIGINT UNSIGNED <<FK逻辑>>
+  * status : VARCHAR(16)
+  first_score : DECIMAL(5,2)
+  first_grader_id : BIGINT UNSIGNED <<FK逻辑>>
+  first_graded_at : DATETIME(3)
+  first_comment : VARCHAR(500)
+  second_score : DECIMAL(5,2)
+  second_grader_id : BIGINT UNSIGNED <<FK逻辑>>
+  second_graded_at : DATETIME(3)
+  second_comment : VARCHAR(500)
+  score_gap : DECIMAL(5,2)
+  arbitration_score : DECIMAL(5,2)
+  arbitrator_id : BIGINT UNSIGNED <<FK逻辑>>
+  arbitrated_at : DATETIME(3)
+  arbitration_reason : VARCHAR(500)
+  final_score : DECIMAL(5,2)
+  * created_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+entity "mk_grade_change_log\n成绩变更记录" as mk_grade_change_log {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * attempt_id : BIGINT UNSIGNED <<FK>>
+  attempt_question_id : BIGINT UNSIGNED <<FK>>
+  * change_type : VARCHAR(32)
+  old_score : DECIMAL(5,2)
+  new_score : DECIMAL(5,2)
+  old_total_score : DECIMAL(7,2)
+  new_total_score : DECIMAL(7,2)
+  * operator_id : BIGINT UNSIGNED <<FK逻辑>>
+  reason : VARCHAR(500)
+  * created_at : DATETIME(3)
+}
+
+entity "mk_score_appeal\n成绩复核申诉" as mk_score_appeal {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * appeal_no : VARCHAR(32) <<UK>>
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * attempt_id : BIGINT UNSIGNED <<FK>>
+  * student_id : BIGINT UNSIGNED <<FK>>
+  question_id : BIGINT UNSIGNED <<FK逻辑>>
+  * reason : TEXT
+  * status : VARCHAR(16)
+  handler_id : BIGINT UNSIGNED <<FK逻辑>>
+  handle_comment : VARCHAR(500)
+  old_score : DECIMAL(7,2)
+  new_score : DECIMAL(7,2)
+  deadline_at : DATETIME(3)
+  * created_at : DATETIME(3)
+  handled_at : DATETIME(3)
+}
+
+' ============================================================
+' 六、统计分析域（3 张）
+' ============================================================
+entity "st_exam_stat\n单场考试统计" as st_exam_stat {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK,UK>>
+  * participant_count : INT
+  * submitted_count : INT
+  * absent_count : INT
+  * submit_rate : DECIMAL(5,2)
+  * avg_score : DECIMAL(7,2)
+  * max_score : DECIMAL(7,2)
+  * min_score : DECIMAL(7,2)
+  * std_dev : DECIMAL(7,2)
+  * pass_count : INT
+  * pass_rate : DECIMAL(5,2)
+  * excellent_count : INT
+  * excellent_rate : DECIMAL(5,2)
+  score_distribution : JSON
+  * calc_at : DATETIME(3)
+  * updated_at : DATETIME(3)
+}
+
+entity "st_question_stat\n题目质量分析" as st_question_stat {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * question_id : BIGINT UNSIGNED <<FK>>
+  * answer_count : INT
+  * correct_count : INT
+  * correct_rate : DECIMAL(5,2)
+  * avg_score_rate : DECIMAL(5,2)
+  * difficulty_index : DECIMAL(5,4)
+  * high_group_rate : DECIMAL(5,2)
+  * low_group_rate : DECIMAL(5,2)
+  * discrimination_index : DECIMAL(5,4)
+  * is_abnormal : TINYINT
+  abnormal_reason : VARCHAR(255)
+  * calc_at : DATETIME(3)
+}
+
+entity "st_knowledge_stat\n知识点失分分布" as st_knowledge_stat {
+  * id : BIGINT UNSIGNED <<PK>>
+  --
+  * exam_id : BIGINT UNSIGNED <<FK>>
+  * knowledge_point_id : BIGINT UNSIGNED <<FK>>
+  * student_count : INT
+  * total_score : DECIMAL(9,2)
+  * lost_score : DECIMAL(9,2)
+  * lost_rate : DECIMAL(5,2)
+  * calc_at : DATETIME(3)
+}
+
+' ============================================================
+' 关系（基数：|| 1，o{ 0..N，o| 0..1）
+' ============================================================
+
+' 系统管理域
+sys_class ||--o{ sys_user : "1:N 所属班级"
+sys_role ||--o{ sys_role_permission : "1:N 授予"
+sys_permission ||--o{ sys_role_permission : "1:N 被授予"
+sys_role ||..o{ sys_user : "role_code 逻辑关联"
+sys_user ||--o{ sys_refresh_token : "1:N 持有"
+sys_user ||--o{ sys_notification : "1:N 接收"
+sys_user ||--o{ qb_question_bank : "1:N 创建题库"
+sys_user ||--o{ qb_bank_authorization : "1:N 被授权"
+sys_user ||--o{ pp_paper : "1:N 创建试卷"
+sys_user ||--o{ ex_exam : "1:N 创建考试"
+sys_user ||--o{ ex_exam_task : "1:N 参考任务"
+sys_user ||--o{ ex_exam_attempt : "1:N 作答"
+sys_user ||--o{ ex_exam_attempt_grant : "1:N 补考授权"
+sys_user ||--o{ ex_anti_cheat_event : "1:N 触发事件"
+sys_user ||--o{ mk_score_appeal : "1:N 发起申诉"
+
+' 知识库与题库域
+kb_knowledge_point ||--o{ kb_knowledge_point : "1:N 父子分类"
+kb_knowledge_point ||--o{ qb_question : "1:N 归属知识点"
+qb_question_bank ||--o{ qb_question : "1:N 包含题目"
+qb_question_bank ||--o{ qb_bank_authorization : "1:N 授权"
+qb_question ||--o{ qb_question_version : "1:N 版本留痕"
+
+' 试卷域
+pp_paper ||--o{ pp_paper_question : "1:N 组成"
+qb_question ||--o{ pp_paper_question : "1:N 被引用"
+
+' 考试与答题域
+pp_paper ||--o{ ex_exam : "1:N 被考试引用"
+ex_exam ||--o{ ex_exam_scope : "1:N 参考范围"
+sys_class ||--o{ ex_exam_scope : "1:N 班级范围"
+ex_exam ||--o{ ex_exam_task : "1:N 生成任务"
+ex_exam_task ||--o{ ex_exam_attempt : "0..1:N 产生答卷"
+ex_exam ||--o{ ex_exam_attempt : "1:N 答卷"
+pp_paper ||--o{ ex_exam_attempt : "1:N 快照来源"
+ex_exam ||--o{ ex_exam_attempt_grant : "1:N 补考授权"
+ex_exam_attempt ||--o{ ex_attempt_question : "1:N 答题明细"
+pp_paper_question ||--o{ ex_attempt_question : "1:N 快照落地"
+qb_question ||--o{ ex_attempt_question : "1:N 引用题目"
+ex_exam_attempt ||--o{ ex_anti_cheat_event : "1:N 留痕"
+
+' 阅卷与复核域
+ex_exam_attempt ||--o{ mk_grading_task : "1:N 产生阅卷任务"
+ex_attempt_question ||--o| mk_grading_task : "1:0..1 一题一任务"
+ex_exam_attempt ||--o{ mk_grade_change_log : "1:N 成绩变更"
+ex_exam ||--o{ mk_score_appeal : "1:N 申诉"
+ex_exam_attempt ||--o{ mk_score_appeal : "1:N 关联答卷"
+
+' 统计分析域
+ex_exam ||--o| st_exam_stat : "1:0..1 单场统计"
+ex_exam ||--o{ st_question_stat : "1:N 题目统计"
+qb_question ||--o{ st_question_stat : "1:N 被统计"
+ex_exam ||--o{ st_knowledge_stat : "1:N 知识点统计"
+kb_knowledge_point ||--o{ st_knowledge_stat : "1:N 被统计"
+
+note right of ex_exam_attempt
+  **幂等与唯一性**
+  - uk_attempt_seq (exam_id, student_id, attempt_seq)
+  - 生成列 active_flag + uk_attempt_active
+    保证"同场同人最多 1 条进行中答卷"
+  - 交卷幂等由 status 状态机 + 行锁保证
+end note
+
+note bottom of qb_question
+  **快照与脱敏**
+  - pp_paper_question / ex_attempt_question
+    保存题目完整 JSON 快照（含答案）
+  - 下发给学生前必须在 service 层剥离
+    correct_answer / analysis / scoring_points
+end note
+
+note bottom of mk_grade_change_log
+  **NFR-18 可追溯**
+  成绩变更必须记录 old/new、
+  操作人、原因与时间。
+end note
+
+legend right
+  实体 31 个，与 docs/design/schema.sql 一一对应
+  |<#22D3EE>| 强实体关系（外键约束） |
+  |..| 逻辑关联（无外键约束，如 role_code） |
+  模块前缀：sys=系统 / kb=知识库 / qb=题库 / pp=试卷 / ex=考试 / mk=阅卷 / st=统计
+endlegend
+
+@enduml
